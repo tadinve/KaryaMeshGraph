@@ -1,0 +1,21 @@
+# Copy to config/source.yaml and adjust `root` for your machine.
+# config/source.yaml is gitignored; this example is the committed template.
+
+source:
+  project: KaryaMeshScratch        # KaryaMeshRAG - the upstream read-only repository
+  root: ../KaryaMeshScratch        # local checkout; never written to
+  generation: v2                   # the frozen corpus generation; never fall back to v1
+  strategy: section                # section-aware chunks are the KG pilot input
+  mode: read_only
+  expected_manifest: evidence/day08/corpus-manifest-v2.json
+  expected_chunks: var/v2/chunks/corpus.section-1000.jsonl
+
+snapshot:
+  output_root: data/snapshots      # gitignored; holds real SOP text locally only
+  verify_sha256: true
+  require_full_evidence_for_extraction: true
+  # The only authorization mode implemented in M1 (SPEC.md M1.3).
+  # A successful import under offline_simulation is never proof of
+  # production authorization.
+  authorization_mode: offline_simulation
+  principal: compliance.officer    # must be an active principal in corpus/authz/identities.json

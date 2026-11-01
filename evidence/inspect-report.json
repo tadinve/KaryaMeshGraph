@@ -1,0 +1,290 @@
+{
+  "acl": {
+    "identities": {
+      "detail": null,
+      "principals": 4,
+      "registry_version": "identities-2026-11-01.1",
+      "status": "available"
+    },
+    "note": "missing or invalid policy is NOT public; access is denied by default",
+    "policy": {
+      "detail": null,
+      "grants": 7,
+      "policy_version": "acl-2026-11-01.1",
+      "status": "available"
+    }
+  },
+  "chunks_file": {
+    "chunk_id_collisions": 0,
+    "documents": 50,
+    "documents_with_multiple_identities": [],
+    "matches_frozen_manifest": true,
+    "path": "../KaryaMeshScratch/var/v2/chunks/corpus.section-1000.jsonl",
+    "record_validation_failures": 0,
+    "records": 1752,
+    "sha256": "720d36e80e0b7b5599ca936b922c9be36dc2fb26c30d205e2d13fc22f0e4b6aa"
+  },
+  "corpus_manifest": {
+    "documents": 50,
+    "missing_documents": [],
+    "pdf_bytes": {
+      "mismatched": [],
+      "missing": [
+        "CRS-SOP-001",
+        "CRS-SOP-002",
+        "CRS-SOP-003",
+        "CRS-SOP-004",
+        "CRS-SOP-005",
+        "CRS-SOP-006",
+        "CRS-SOP-007",
+        "CRS-SOP-008",
+        "CRS-SOP-009",
+        "CRS-SOP-010",
+        "CRS-SOP-011",
+        "CRS-SOP-012",
+        "CRS-SOP-013",
+        "CRS-SOP-014",
+        "CRS-SOP-015",
+        "CRS-SOP-016",
+        "CRS-SOP-017",
+        "CRS-SOP-018",
+        "CRS-SOP-019",
+        "CRS-SOP-020",
+        "CRS-SOP-021",
+        "CRS-SOP-022",
+        "CRS-SOP-023",
+        "CRS-SOP-024",
+        "CRS-SOP-025",
+        "CRS-SOP-026",
+        "CRS-SOP-027",
+        "CRS-SOP-028",
+        "CRS-SOP-029",
+        "CRS-SOP-030",
+        "CRS-SOP-031",
+        "CRS-SOP-032",
+        "CRS-SOP-033",
+        "CRS-SOP-034",
+        "CRS-SOP-035",
+        "CRS-SOP-036",
+        "CRS-SOP-037",
+        "CRS-SOP-038",
+        "CRS-SOP-039",
+        "CRS-SOP-040",
+        "CRS-SOP-041",
+        "CRS-SOP-042",
+        "CRS-SOP-043",
+        "CRS-SOP-044",
+        "CRS-SOP-045",
+        "CRS-SOP-046",
+        "CRS-SOP-047",
+        "CRS-SOP-048",
+        "CRS-SOP-049",
+        "CRS-SOP-050"
+      ],
+      "verified": 0
+    },
+    "pdf_sha256_mismatches": []
+  },
+  "failures": [],
+  "frozen_manifest": {
+    "fingerprint": {
+      "chunks": 1752,
+      "documents": 50,
+      "file": "corpus.section-1000.jsonl",
+      "sha256": "720d36e80e0b7b5599ca936b922c9be36dc2fb26c30d205e2d13fc22f0e4b6aa"
+    },
+    "frozen_at": "2026-10-19T21:47:53+00:00",
+    "path": "../KaryaMeshScratch/evidence/day08/corpus-manifest-v2.json",
+    "sha256": "b1a8b479a7f9aaca8350c2943bf230ee87a77404a4027b36dc7e34e59c5925f8",
+    "status": "frozen",
+    "versions": {
+      "annotation": "2026-10-19.1",
+      "classifier": "2026-10-19.6",
+      "fixed": "2026-10-19.1",
+      "reconstructor": "2026-10-19.1",
+      "section": "2026-10-19.2"
+    }
+  },
+  "full_fidelity": {
+    "artifacts": [
+      {
+        "document": "CRS-SOP-005",
+        "kind": "var_extract",
+        "layer": "classified",
+        "path": "var/extract/CRS-SOP-005.classified.jsonl",
+        "v2_compatible": false,
+        "version_stamps": {
+          "classifier": "2026-10-16.6",
+          "extractor": "pdfplumber 0.11.10"
+        }
+      },
+      {
+        "document": "CRS-SOP-005",
+        "kind": "var_extract",
+        "layer": "elements",
+        "path": "var/extract/CRS-SOP-005.elements.jsonl",
+        "v2_compatible": false,
+        "version_stamps": {
+          "reconstructor": "2026-10-16.4"
+        }
+      },
+      {
+        "document": "CRS-SOP-005",
+        "kind": "var_extract",
+        "layer": "segments",
+        "path": "var/extract/CRS-SOP-005.jsonl",
+        "v2_compatible": false,
+        "version_stamps": {
+          "extractor": "pdfplumber 0.11.10"
+        }
+      },
+      {
+        "document": "CRS-SOP-009",
+        "kind": "dissection_fixture",
+        "layer": "segments",
+        "path": "evidence/dissect/CRS-SOP-009/02_extract.jsonl",
+        "v2_compatible": false,
+        "version_stamps": {}
+      },
+      {
+        "document": "CRS-SOP-009",
+        "kind": "dissection_fixture",
+        "layer": "classified",
+        "path": "evidence/dissect/CRS-SOP-009/03_classify.jsonl",
+        "v2_compatible": false,
+        "version_stamps": {
+          "classifier": "2026-10-16.6"
+        }
+      },
+      {
+        "document": "CRS-SOP-009",
+        "kind": "dissection_fixture",
+        "layer": "elements",
+        "path": "evidence/dissect/CRS-SOP-009/05_elements.jsonl",
+        "v2_compatible": false,
+        "version_stamps": {
+          "reconstructor": "2026-10-16.4"
+        }
+      },
+      {
+        "document": "CRS-SOP-009",
+        "kind": "dissection_fixture",
+        "layer": "sections",
+        "path": "evidence/dissect/CRS-SOP-009/07_sections.json",
+        "v2_compatible": false,
+        "version_stamps": {}
+      },
+      {
+        "document": "CRS-SOP-018",
+        "kind": "dissection_fixture",
+        "layer": "segments",
+        "path": "evidence/dissect/CRS-SOP-018/02_extract.jsonl",
+        "v2_compatible": false,
+        "version_stamps": {}
+      },
+      {
+        "document": "CRS-SOP-018",
+        "kind": "dissection_fixture",
+        "layer": "classified",
+        "path": "evidence/dissect/CRS-SOP-018/03_classify.jsonl",
+        "v2_compatible": false,
+        "version_stamps": {
+          "classifier": "2026-10-16.6"
+        }
+      },
+      {
+        "document": "CRS-SOP-018",
+        "kind": "dissection_fixture",
+        "layer": "elements",
+        "path": "evidence/dissect/CRS-SOP-018/05_elements.jsonl",
+        "v2_compatible": false,
+        "version_stamps": {
+          "reconstructor": "2026-10-16.4"
+        }
+      },
+      {
+        "document": "CRS-SOP-018",
+        "kind": "dissection_fixture",
+        "layer": "sections",
+        "path": "evidence/dissect/CRS-SOP-018/07_sections.json",
+        "v2_compatible": false,
+        "version_stamps": {}
+      }
+    ],
+    "dissection_fixture_documents": [
+      "CRS-SOP-009",
+      "CRS-SOP-018"
+    ],
+    "missing_full_source_documents": [
+      "CRS-SOP-001",
+      "CRS-SOP-002",
+      "CRS-SOP-003",
+      "CRS-SOP-004",
+      "CRS-SOP-005",
+      "CRS-SOP-006",
+      "CRS-SOP-007",
+      "CRS-SOP-008",
+      "CRS-SOP-009",
+      "CRS-SOP-010",
+      "CRS-SOP-011",
+      "CRS-SOP-012",
+      "CRS-SOP-013",
+      "CRS-SOP-014",
+      "CRS-SOP-015",
+      "CRS-SOP-016",
+      "CRS-SOP-017",
+      "CRS-SOP-018",
+      "CRS-SOP-019",
+      "CRS-SOP-020",
+      "CRS-SOP-021",
+      "CRS-SOP-022",
+      "CRS-SOP-023",
+      "CRS-SOP-024",
+      "CRS-SOP-025",
+      "CRS-SOP-026",
+      "CRS-SOP-027",
+      "CRS-SOP-028",
+      "CRS-SOP-029",
+      "CRS-SOP-030",
+      "CRS-SOP-031",
+      "CRS-SOP-032",
+      "CRS-SOP-033",
+      "CRS-SOP-034",
+      "CRS-SOP-035",
+      "CRS-SOP-036",
+      "CRS-SOP-037",
+      "CRS-SOP-038",
+      "CRS-SOP-039",
+      "CRS-SOP-040",
+      "CRS-SOP-041",
+      "CRS-SOP-042",
+      "CRS-SOP-043",
+      "CRS-SOP-044",
+      "CRS-SOP-045",
+      "CRS-SOP-046",
+      "CRS-SOP-047",
+      "CRS-SOP-048",
+      "CRS-SOP-049",
+      "CRS-SOP-050"
+    ],
+    "v2_compatible_documents": [],
+    "verdict": "chunk_only"
+  },
+  "generation": "v2",
+  "git": {
+    "commit": "c069874cdb2d6335943cba2f348d7110d358d00a",
+    "dirty": true,
+    "dirty_entries": 10,
+    "status": "available"
+  },
+  "ok": true,
+  "revision_metadata": {
+    "all_simulated": true,
+    "detail": null,
+    "documents": 50,
+    "status": "available"
+  },
+  "schema_version": "1.0.0",
+  "source_root": "../KaryaMeshScratch",
+  "strategy": "section"
+}

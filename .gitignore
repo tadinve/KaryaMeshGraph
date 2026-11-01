@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.egg-info/
+
+# macOS / Drive
+.DS_Store
+Icon?
+
+# ALL local data: upstream KaryaMeshRAG links, snapshots with real SOP text,
+# gold labels pending commit approval. The repo is PUBLIC - never commit
+# source PDFs, SOP text, or raw extraction artifacts (SPEC.md §0.8).
+data/
+
+# Local machine configuration and secrets
+config/source.yaml
+.env
+*.sqlite3
+
+# Runtime output
+var/
+
+# Local bootstrap script (contains a GCP project id)
+init.sh
