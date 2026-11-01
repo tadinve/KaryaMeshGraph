@@ -34,6 +34,7 @@ from ..contracts.models import (
     validate_chunk_record,
 )
 from ..errors import MalformedRecordError
+from .authz import EFFECT_ALLOW, evaluate_document_access
 
 
 def _fail(failures: list[dict], code: str, message: str) -> None:
@@ -287,6 +288,9 @@ def verify_snapshot(snapshot_dir: Path) -> dict:
         _fail(failures, "authorization",
               "authorization_context must state is_production_authorization: false")
     principal = ctx.get("principal")
+    principal = ctx.get("principal")
+    pinfo = None
+    identities = None
     if not principal:
         _fail(failures, "authorization", "authorization_context lacks a principal")
     else:
@@ -294,6 +298,7 @@ def verify_snapshot(snapshot_dir: Path) -> dict:
         if err or not isinstance(identities, dict):
             _fail(failures, "authorization",
                   "cannot resolve principal: snapshotted identity registry unavailable")
+            identities = None
         else:
             pinfo = (identities.get("principals") or {}).get(principal)
             if not isinstance(pinfo, dict) or pinfo.get("status") != "active":
@@ -304,14 +309,52 @@ def verify_snapshot(snapshot_dir: Path) -> dict:
                 _fail(failures, "authorization",
                       "authorization_context registry_version disagrees with the "
                       "snapshotted registry")
+    acl = None
     if ctx.get("policy_status") == "available":
         acl, err = _load_json_artifact(snapshot_dir, "authz/acl-policy.json")
         if err or not isinstance(acl, dict):
             _fail(failures, "authorization",
                   "policy_status says available but the ACL policy artifact is unusable")
+            acl = None
         elif ctx.get("policy_version") != acl.get("policy_version"):
             _fail(failures, "authorization",
                   "authorization_context policy_version disagrees with the snapshotted policy")
+
+    # Independent re-evaluation of every included document's authorization
+    # decision (2026-11-01 review finding): the builder refuses to include a
+    # denied document, but the verifier must not simply trust the stored
+    # "allow" - it recomputes the same explicit-deny/allow/default-deny
+    # resolution from the snapshotted policy and fails if either the
+    # recomputed effect disagrees with what was stored (tampering), or the
+    # recomputed effect is not "allow" (a document that should never have
+    # been included). policy_time is read from the manifest's
+    # authorization_context, never from wall-clock "now".
+    policy_time = ctx.get("policy_time")
+    if principal and isinstance(policy_time, str):
+        for doc in manifest_docs:
+            if not isinstance(doc, dict):
+                continue
+            sid = doc.get("document_id")
+            stored = ((doc.get("acl") or {}).get("authorization_decision")
+                      if isinstance(doc.get("acl"), dict) else None)
+            if not isinstance(stored, dict):
+                _fail(failures, "authorization",
+                      f"document {sid}: missing authorization_decision")
+                continue
+            recomputed = evaluate_document_access(
+                principal=principal, pinfo=pinfo or {}, document_id=sid,
+                document_series=doc.get("source_series"),
+                acl=acl, policy_time_iso=policy_time,
+            )
+            recomputed_stripped = {k: v for k, v in recomputed.items() if k != "policy_time"}
+            if stored != recomputed_stripped:
+                _fail(failures, "authorization",
+                      f"document {sid}: authorization_decision does not recompute "
+                      f"from the snapshotted policy (tampered?)")
+            elif stored.get("effect") != EFFECT_ALLOW:
+                _fail(failures, "authorization",
+                      f"document {sid}: included in snapshot despite a non-allow "
+                      f"authorization decision ({stored.get('resolution')})")
 
     # The manifest's embedded document records must equal the hash-verified
     # documents.json artifact - the manifest itself is otherwise unauthenticated.

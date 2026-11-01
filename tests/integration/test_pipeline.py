@@ -27,6 +27,15 @@ def test_inspect_ok(synthetic_source):
     assert report["full_fidelity"]["verdict"] == "chunk_only"
     assert report["revision_metadata"]["all_simulated"] is True
     assert report["acl"]["identities"]["status"] == "available"
+    # Regression (2026-11-01 review): the PDF-bytes check joined
+    # "data/originals/" onto a corpus-manifest `file` value that is already
+    # root-relative (e.g. "data/originals/X.pdf"), so every real PDF read
+    # as missing even though it existed on disk. Both fixture documents'
+    # PDFs are on disk and must independently hash-verify, not merely
+    # fail to appear in "mismatched".
+    assert report["corpus_manifest"]["pdf_bytes"]["verified"] == len(DOCS)
+    assert report["corpus_manifest"]["pdf_bytes"]["missing"] == []
+    assert report["corpus_manifest"]["pdf_bytes"]["mismatched"] == []
     # The machine-readable report never contains source text.
     assert SYNTH_MARKER not in json.dumps(report)
 

@@ -1,0 +1,11 @@
+{
+  "edge_count": 1939,
+  "evidence_spans_verified": 2464,
+  "failures": [],
+  "graph": "data/graphs/structural-v2",
+  "graph_id": "kgraph-81321a6504746a6f4c8c61dedc66d573fdef2f221eeb1cfde4619d133cbd3fc8",
+  "node_count": 1983,
+  "ok": true,
+  "snapshot": "data/snapshots/full-v2",
+  "snapshot_ok": true
+}

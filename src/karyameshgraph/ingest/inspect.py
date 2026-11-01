@@ -143,7 +143,10 @@ def inspect_source(layout: SourceLayout) -> dict:
         entry = corpus.get(sid)
         if entry is None:
             continue
-        pdf_path = layout.root / "data" / "originals" / str(entry.get("file") or "")
+        # entry["file"] is already root-relative (e.g. "data/originals/..pdf");
+        # joining it under another "data/originals/" prefix silently doubled
+        # the path and made every PDF look missing (2026-11-01 review finding).
+        pdf_path = layout.root / str(entry.get("file") or "")
         if not pdf_path.is_file():
             pdf_bytes["missing"].append(sid)
             continue
@@ -189,13 +192,21 @@ def inspect_source(layout: SourceLayout) -> dict:
         "all_simulated": (all(d.get("is_simulated") for d in dms)
                           if isinstance(dms, list) and dms else None),
     }
+    # Content hashes of the ACL inputs themselves, so a silent edit to
+    # identities.json / acl-policy.json (new/changed grants, principal
+    # status flips) is independently detectable even if the *version*
+    # string is left unchanged (2026-11-01 review finding).
+    identities_path = layout.root / "corpus" / "authz" / "identities.json"
+    acl_path = layout.root / "corpus" / "authz" / "acl-policy.json"
     report["acl"] = {
         "identities": {"status": id_status, "detail": id_detail,
                        "registry_version": (ids or {}).get("registry_version") if id_status == STATUS_AVAILABLE else None,
-                       "principals": len((ids or {}).get("principals", {})) if id_status == STATUS_AVAILABLE else None},
+                       "principals": len((ids or {}).get("principals", {})) if id_status == STATUS_AVAILABLE else None,
+                       "sha256": sha256_file(identities_path) if id_status == STATUS_AVAILABLE else None},
         "policy": {"status": acl_status, "detail": acl_detail,
                    "policy_version": (acl or {}).get("policy_version") if acl_status == STATUS_AVAILABLE else None,
-                   "grants": len((acl or {}).get("grants", [])) if acl_status == STATUS_AVAILABLE else None},
+                   "grants": len((acl or {}).get("grants", [])) if acl_status == STATUS_AVAILABLE else None,
+                   "sha256": sha256_file(acl_path) if acl_status == STATUS_AVAILABLE else None},
         "note": "missing or invalid policy is NOT public; access is denied by default",
     }
     for label, status in (("mock_dms documents", dms_status),

@@ -178,6 +178,7 @@ def document_version_record(
     acl_policy_version: str | None,
     registry_version: str | None,
     derived_grants: list[dict] | None,
+    authorization_decision: dict,
     provenance_capability: str,
     source_generation: str,
     source_manifest_sha256: str,
@@ -190,6 +191,12 @@ def document_version_record(
     - ACL linkage is a DERIVED join (upstream has no per-document policy ref);
       ``acl_status`` is one of available/missing/invalid/not_loaded and missing
       is never treated as public.
+    - ``authorization_decision`` (SPEC.md M5, 2026-11-01 review) is the actual
+      ALLOW/DENY resolution for this document under the given principal and
+      policy, computed by ``ingest.authz.evaluate_document_access``; the
+      caller refuses the whole build before this record is ever written if
+      the effect is not ``allow`` (document content is never copied for a
+      denied document).
     """
     stable_id, object_id, version, pdf_sha256 = chunk_identity
     rec: dict = {
@@ -223,6 +230,17 @@ def document_version_record(
             # an allow. None = policy missing/invalid (never 'public').
             "derived_grants": derived_grants,
             "derivation": "derived",  # never upstream fact (SPEC.md §5.1)
+            # The actual allow/deny resolution for this principal at
+            # policy_time (offline_simulation only - see ingest.authz).
+            # The builder refuses to copy content for any document whose
+            # effect is not "allow"; a document record only ever reaches
+            # this snapshot with effect == "allow".
+            "authorization_decision": {
+                k: v for k, v in authorization_decision.items() if k != "policy_time"
+            },  # policy_time lives only in the manifest's authorization_context
+                # (excluded from content identity), so a repeat build at a
+                # different wall-clock instant with an unchanged allow/deny
+                # outcome still yields the same content-derived snapshot_id.
         },
         "provenance_capability": provenance_capability,
         # chunk_only snapshots must refuse later rule extraction (SPEC.md M1.2).

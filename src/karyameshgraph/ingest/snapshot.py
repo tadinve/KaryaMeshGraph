@@ -6,6 +6,10 @@ Fail-closed rules implemented here:
 - the authorization mode must be ``offline_simulation`` with an ACTIVE
   principal from the snapshotted identity registry; missing identities fail
   the build; missing ACL policy is recorded as missing - never public;
+- every REQUESTED document is evaluated against the snapshotted ACL policy
+  (``ingest.authz``, explicit deny > allow > default deny); a principal that
+  does not resolve to ``allow`` for a document never has that document's
+  content copied - the whole build refuses closed instead (SPEC.md M5);
 - every document is labeled with its actual provenance capability
   (``chunk_only`` today); ``extraction_eligible`` is false for chunk_only;
 - files are written into a temporary sibling directory and renamed into
@@ -40,8 +44,10 @@ from ..errors import (
     MalformedRecordError,
     SnapshotStateError,
 )
+from .authz import EFFECT_ALLOW, evaluate_document_access
 from .source import STATUS_AVAILABLE, SourceLayout, sha256_file
 from .verify import verify_content
+
 
 
 def _derived_grants(acl: dict | None, stable_id: str, series: str | None) -> list[dict] | None:
@@ -160,6 +166,33 @@ def build_snapshot(
                  if dms_status == STATUS_AVAILABLE and isinstance(dms_docs, list) else {})
     acl_status, acl, _ = layout.load_acl_policy()
 
+    # Document-level authorization (SPEC.md M5, 2026-11-01 review finding):
+    # an active principal is NOT automatically authorized for every document.
+    # Evaluate the upstream policy's own resolution order per requested
+    # document and refuse the entire build if any document does not resolve
+    # to an explicit allow - a denied document's content is never copied,
+    # and the build fails before any chunk line is even collected.
+    decisions: dict[str, dict] = {}
+    denied: list[str] = []
+    for sid in sorted(documents):
+        entry = corpus.get(sid)
+        decision = evaluate_document_access(
+            principal=principal, pinfo=pinfo, document_id=sid,
+            document_series=entry.get("source_series") if entry else None,
+            acl=acl if acl_status == STATUS_AVAILABLE else None,
+            policy_time_iso=created_at,
+        )
+        decisions[sid] = decision
+        if decision["effect"] != EFFECT_ALLOW:
+            denied.append(sid)
+    if denied:
+        raise AuthorizationError(
+            "principal is not authorized (offline-simulation ACL policy) for "
+            "one or more requested documents; refusing import - no document "
+            "content is copied for a denied document",
+            principal=principal, denied_documents=denied,
+        )
+
     # Full-fidelity availability. Importing element/section artifacts is NOT
     # implemented yet, so a document with a demonstrably v2-compatible full
     # layer is refused loudly rather than mislabeled 'full' without its
@@ -222,6 +255,7 @@ def build_snapshot(
             registry_version=identities.get("registry_version"),
             derived_grants=_derived_grants(acl if acl_status == STATUS_AVAILABLE else None,
                                            sid, entry.get("source_series")),
+            authorization_decision=decisions[sid],
             provenance_capability=CAPABILITY_CHUNK_ONLY,
             source_generation=layout.generation,
             source_manifest_sha256=source_manifest_sha,
@@ -295,6 +329,10 @@ def build_snapshot(
                 "registry_version": identities.get("registry_version"),
                 "policy_version": (acl or {}).get("policy_version") if acl_status == STATUS_AVAILABLE else None,
                 "policy_status": acl_status,
+                # The "current policy time" the upstream policy note requires
+                # (never a historical as-of); every included document's
+                # authorization_decision was evaluated at this instant.
+                "policy_time": created_at,
                 "is_production_authorization": False,
             },
             "created_at": created_at,  # informational; excluded from snapshot_id

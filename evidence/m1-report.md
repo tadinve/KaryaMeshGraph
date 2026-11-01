@@ -1,8 +1,13 @@
 # M1 Evidence Report — read-only KaryaMeshRAG artifact integration
 
-**Status: FINAL — all results below are from actual executed commands
-(test suite and pilot import run by the project owner on 2026-11-01;
-output pasted verbatim into the session and transcribed here).**
+**Status: FINAL, corrected 2026-11-01.** Sections 2 and 7 below are updated
+by a 2026-11-02 review that found two real defects in the original M1
+implementation (not in the test suite, which never exercised real PDF bytes
+end-to-end and never exercised a denied/default-deny document). Both are
+fixed, independently re-verified against the real upstream checkout, and
+covered by new regression tests. See **§2a** and **§2b** for the corrected
+findings; the rest of this report (hashing conventions, snapshot/verify
+contract, test counts) is unchanged and still accurate.
 
 ## 1. Repository and environment
 
@@ -41,10 +46,132 @@ the local checkout; no upstream file modified):
    (`is_simulated: true`); `supersedes` NULL for all 50 rows; no per-document
    `acl_policy_ref` (doc→grant join is derived); registry
    `identities-2026-11-01.1`, policy `acl-2026-11-01.1` (4 principals,
-   8 grants).
+   **7 grants — corrected 2026-11-02, see §2b**; the original "8 grants" was
+   a transcription error, never matched by the machine-readable
+   `evidence/inspect-report.json`, which always recorded 7).
 5. **Structural layer** ~80–85% deterministically parseable from chunks;
    in-corpus citation resolution requires the alias table
    (`corpus/manifest.json` `source_document_number` provides it).
+
+## 2a. Correction — PDF byte verification (2026-11-02)
+
+**Finding:** `src/karyameshgraph/ingest/inspect.py` built each original PDF's
+path as `layout.root / "data" / "originals" / entry["file"]`, but
+`corpus/manifest.json` entries carry `file` as a **root-relative** path
+(e.g. `"data/originals/CRS-SOP-001.pdf"`), not a bare filename. The join
+silently doubled the prefix (`data/originals/data/originals/...`), so every
+real PDF read as missing. The §2 point 3 claim above ("all 50 PDFs present")
+was never actually exercised by code — it was a directory listing, not a
+hash-verified read.
+
+**Before the fix** (`evidence/inspect-report.json`, 2026-11-01 run):
+`corpus_manifest.pdf_bytes = {"verified": 0, "missing": [CRS-SOP-001 .. 050],
+"mismatched": []}` — 0/50 verified, 50/50 reported missing, despite the
+files existing on disk at the correct (single-prefix) path.
+
+**Fix:** resolve `layout.root / entry["file"]` directly (one join, no
+re-prepended prefix). Regression coverage added:
+[tests/unit/test_source_layout.py](../tests/unit/test_source_layout.py)
+(direct repro: resolves correctly under the fix, not under the historical
+buggy construction) and an assertion in
+[tests/integration/test_pipeline.py](../tests/integration/test_pipeline.py)
+that `pdf_bytes.verified == len(DOCS)` on every inspect run. The two
+synthetic fixtures (`tests/synthetic.py`, `tests/structural_fixture.py`) were
+also corrected: their `corpus_entries["file"]` previously used a bare
+filename, which is why the fixture suite never caught the real bug (the
+double-prefixed and bare-filename cases happened to collide under the old
+buggy code).
+
+**Re-verified against the real upstream checkout (2026-11-02):**
+
+```bash
+uv run karyameshgraph source inspect --source-root ../KaryaMeshScratch \
+  --generation v2 --strategy section --json-out evidence/inspect-report.json
+```
+
+`corpus_manifest.pdf_bytes = {"verified": 50, "missing": [], "mismatched":
+[]}` — **all 50 original PDFs independently hash-verified against
+`corpus/manifest.json`**; verdict **OK**. This corrects §2 point 3: PDF
+presence is now actually demonstrated by a recomputed SHA-256 over the raw
+file bytes, not inferred from the fact that files existed somewhere on disk.
+
+## 2b. Correction — document-level ACL enforcement (2026-11-02)
+
+**Finding:** the snapshot builder validated that the principal was an
+*active* entry in `corpus/authz/identities.json`, then recorded whichever
+ACL grants happened to reference a requested document as informational
+`derived_grants` (`SPEC.md §5.1`) — but it never evaluated those grants to
+decide whether the principal could actually see that document's content.
+An active principal with **zero matching grants**, or with only an
+**explicit deny**, was silently treated the same as one with an explicit
+allow: the chunk content was copied into the snapshot regardless. This is
+exactly the gap SPEC.md M5 and the review flagged — "do not silently treat
+an active principal as authorized for every document."
+
+Separately, the original "8 grants" claim in §2 point 4 never matched the
+checked-in `evidence/inspect-report.json`, which always recorded 7 — the
+real upstream `corpus/authz/acl-policy.json` has exactly 7 grant entries
+(`G-001, G-010, G-011, G-020, G-021, G-022, G-023`). The "8" was a
+transcription slip, not a parsing bug.
+
+**Fix:** a new module,
+[src/karyameshgraph/ingest/authz.py](../src/karyameshgraph/ingest/authz.py),
+evaluates the upstream policy's own documented resolution order
+(`explicit deny` > `allow` > `default deny`) per requested document, using
+the import's `created_at` as the "current policy time" (never a historical
+as-of, per the policy's own note; never live wall-clock time, since this
+remains offline simulation). `snapshot build`
+([src/karyameshgraph/ingest/snapshot.py](../src/karyameshgraph/ingest/snapshot.py))
+now refuses the **entire** build — before any chunk line is even read — if
+any requested document does not resolve to an explicit `allow`. A missing or
+invalid ACL policy matches no grants and therefore resolves every document
+to `default_deny`: it is still never treated as public. Each surviving
+document's `acl.authorization_decision` (effect, resolution,
+matched_grant_ids) is recorded in `documents.json`, and `snapshot verify`
+([src/karyameshgraph/ingest/verify.py](../src/karyameshgraph/ingest/verify.py))
+**independently recomputes** every document's decision from the snapshotted
+policy/identity artifacts rather than trusting the stored value, catching a
+tampered decision or a document that should never have been included.
+
+This stays explicitly **offline simulation**: `authorization_context`
+still states `is_production_authorization: false`; the policy-evaluation
+time (`policy_time`) is recorded in the manifest (excluded from the
+content-derived `snapshot_id`, like `created_at`) but never baked into the
+hashed per-document record, so repeat builds at different wall-clock
+instants with an unchanged allow/deny outcome still produce the identical
+`snapshot_id`. A successful import decision is still never proof of
+production authorization; the eventual query layer must reauthorize at
+query time.
+
+**New regression tests**
+([tests/integration/test_negative.py](../tests/integration/test_negative.py)):
+missing/invalid policy denies all documents and leaks nothing
+(`test_missing_acl_policy_denies_import`); an explicit deny blocks only the
+denied document while an unaffected document can still be imported
+(`test_explicit_deny_blocks_denied_document_import`); no matching grant at
+all is a default deny, never an implicit allow
+(`test_default_deny_when_no_grant_matches`); a withdrawn document's
+*lifecycle* ineligibility is independent of its *ACL* decision
+(`test_withdrawn_document_not_eligible_and_no_leak`); the decision is
+recorded, excluded from content identity, and independently re-verified,
+with tamper detection exercised directly
+(`test_authorization_decision_recorded_and_independently_verified`).
+Disabled-principal and unknown-principal coverage already existed
+(`test_unknown_and_disabled_principals_fail`) and is unchanged.
+
+**Re-verified against the real upstream checkout:** both the pilot
+(`CRS-SOP-009`, `CRS-SOP-018`) and full 50-document snapshot build
+successfully under principal `compliance.officer`, whose `compliance` group
+holds grant `G-001` (`document_id: "*"`, `effect: allow`) — every document's
+`acl.authorization_decision` resolves to `{"effect": "allow", "resolution":
+"allow", "matched_grant_ids": ["G-001"]}`. Both snapshots independently
+verify OK under `snapshot verify`. `evidence/inspect-report.json`'s `acl`
+section now also records the content SHA-256 of `identities.json`
+(`961199b9921c6dcc29174722c536892544cdd5965b50bfb7702b1d4049654a92`) and
+`acl-policy.json`
+(`8ab997554f15eaf5670d7891d1e9237655d30210293bf97ba9621e541c2310e6`)
+alongside their version strings, so a silent content edit under an
+unchanged version string is independently detectable.
 
 ## 3. Commands to reproduce (M1 CLI)
 
@@ -118,11 +245,26 @@ The snapshot lives under `data/snapshots/pilot-v2` — a gitignored path
 - Importing element/section artifacts is not implemented; the builder
   refuses loudly if v2-compatible full layers ever appear.
 - Lifecycle metadata is simulated upstream and labeled as such end-to-end;
-  `offline_simulation` authorization is never production authorization.
+  `offline_simulation` authorization is never production authorization —
+  including the new document-level ACL enforcement (§2b): the decision is
+  evaluated once, at import time, against the snapshotted policy, and is
+  never re-checked at query time.
+- `policy_time` for ACL evaluation is the import's `created_at` parameter,
+  not live wall-clock time; a caller who passes a stale `created_at` gets a
+  stale (but still fail-closed) authorization decision. This is acceptable
+  for an offline, reproducible import tool, but is a recorded constraint
+  for whoever eventually builds the production query-time reauthorization
+  layer.
 - The exact pdfplumber version behind v2 is inferred (0.11.10), not recorded
   upstream — a recorded risk for the regeneration task.
 - Upstream git tree was dirty at inspection; snapshots record commit + dirty
   flag rather than assuming a clean tree.
+- (2026-11-02) The local macOS/Drive working copy periodically regenerates
+  stray `Icon` resource-fork files inside `data/` subdirectories (outside
+  this project's control). `snapshot verify`'s undeclared-file tamper check
+  correctly flags these as failures; they are not snapshot corruption and
+  are simply deleted before re-verifying. `.gitignore` already excludes
+  `Icon?`, so this never affects what is committed.
 
 ## 7. Verdicts
 
@@ -133,16 +275,31 @@ The snapshot lives under `data/snapshots/pilot-v2` — a gitignored path
   shows only code/config/docs — no SOP content stageable. Nothing is
   committed yet; the staged-file inspection repeats before every actual
   commit (SPEC §0.8).
-- **M1: PASS.** All four deliverables — source inspector, snapshot builder,
-  independent verifier, negative-test suite — implemented and exercised
-  against the real upstream corpus: 47/47 tests pass with
-  `KMG_REAL_SOURCE_ROOT` set; inspect verdict OK with frozen-fingerprint
-  MATCH; pilot build + independent verify both OK with a deterministic
-  content-derived snapshot_id. The trustworthy connection from the RAG
-  artifacts to the knowledge-graph input layer is demonstrated end to end.
+- **M1: PASS (corrected 2026-11-02).** All four deliverables — source
+  inspector, snapshot builder, independent verifier, negative-test suite —
+  implemented and exercised against the real upstream corpus. The original
+  PASS verdict rested on two defects that have now been found, fixed, and
+  independently re-verified: the PDF byte-verification path bug (§2a, fixed
+  — 50/50 PDFs now independently hash-verified, were 0/50) and the
+  authorization gap where an active principal was implicitly authorized for
+  every document regardless of the ACL policy (§2b, fixed — document-level
+  ACL is now genuinely enforced, with independent re-verification and a
+  default-deny posture for missing/invalid policy). With both fixes in
+  place: 72/72 tests pass with `KMG_REAL_SOURCE_ROOT` set (0 failed, 0
+  skipped; see `evidence/m1_5-report.md` §5 for the full count including
+  M1.5's additions); inspect verdict OK with frozen-fingerprint MATCH and
+  50/50 PDF bytes verified; pilot and full-corpus builds + independent
+  verify both OK under principal `compliance.officer` with deterministic
+  content-derived `snapshot_id`s. The trustworthy, authorization-enforced
+  connection from the RAG artifacts to the knowledge-graph input layer is
+  now demonstrated end to end.
 
 ## 8. Recommended next step
 
-Review this report at the M1 gate. Then: expand the verified snapshot to all
-50 documents (the M1.5 entry gate), build the deterministic structural graph
-(M1.5), and plan the controlled element-layer regeneration that unblocks M2.
+M1 corrections are in place and M1.5 (deterministic structural graph) is
+now complete — see `evidence/m1_5-report.md` for its full evidence and
+verdict. Per SPEC.md M2's blocking precondition, do **not** begin M2 (rule
+extraction) until a controlled regeneration of the full element/section
+layer runs outside the frozen upstream tree; until then all snapshots stay
+`chunk_only` and extraction stays blocked by design.
+

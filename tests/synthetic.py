@@ -104,7 +104,7 @@ def build_synthetic_source(root: Path) -> Path:
             records.append(_chunk_record(doc, obj, pdf_sha, i))
         corpus_entries.append({
             "stable_id": doc,
-            "file": f"{doc}.pdf",
+            "file": f"data/originals/{doc}.pdf",
             "sha256": pdf_sha,
             "bytes": len(pdf_bytes),
             "pages": 1,

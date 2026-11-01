@@ -198,16 +198,17 @@ def test_unsupported_authorization_mode_fails(synthetic_source, tmp_path):
         _build(synthetic_source, tmp_path / "s", authorization_mode="production")
 
 
-def test_missing_acl_policy_is_recorded_never_public(synthetic_source, tmp_path):
+def test_missing_acl_policy_denies_import(synthetic_source, tmp_path):
+    """Missing policy must NOT be treated as public (2026-11-01 review): with
+    no ACL policy artifact every document resolves to default_deny, so the
+    whole import is refused - nothing is copied, nothing leaks."""
     (synthetic_source / "corpus/authz/acl-policy.json").unlink()
     out = tmp_path / "snap"
-    manifest = _build(synthetic_source, out)
-    for doc in manifest["documents"]:
-        assert doc["acl"]["status"] == "missing"
-        assert doc["acl"]["derived_grants"] is None
-        assert "public" not in json.dumps(doc["acl"]).lower()
-    assert manifest["authorization_context"]["policy_status"] == "missing"
-    assert verify_snapshot(out)["ok"]
+    with pytest.raises(AuthorizationError) as exc:
+        _build(synthetic_source, out)
+    assert sorted(exc.value.context["denied_documents"]) == sorted(DOCS)
+    assert not out.exists()
+    assert SYNTH_MARKER not in str(exc.value)
 
 
 def test_invalid_authz_json_fails_closed(synthetic_source, tmp_path):
@@ -228,21 +229,73 @@ def test_withdrawn_document_not_eligible_and_no_leak(synthetic_source, tmp_path)
     manifest = _build(synthetic_source, out)
     by_id = {d["document_id"]: d for d in manifest["documents"]}
     assert by_id[DOCS[1]]["eligibility"]["status"] == "not_eligible_offline_simulated"
+    # Lifecycle (approval/withdrawal) and ACL authorization are independent
+    # axes (SPEC.md §5.7): withdrawal blocks *extraction* eligibility, not
+    # the import-time ACL decision, which the wildcard allow still grants.
+    assert by_id[DOCS[1]]["acl"]["authorization_decision"]["effect"] == "allow"
     assert SYNTH_MARKER not in json.dumps(manifest)  # metadata only, no content
     assert verify_snapshot(out)["ok"]
 
 
-def test_deny_grant_keeps_its_effect(synthetic_source, tmp_path):
+def test_explicit_deny_blocks_denied_document_import(synthetic_source, tmp_path):
+    """An explicit deny for one document must refuse the whole import - the
+    wildcard allow (g1) must never silently override it."""
     acl_path = synthetic_source / "corpus/authz/acl-policy.json"
     pol = json.loads(acl_path.read_text())
     pol["grants"].append({"grant_id": "g2", "subject_type": "principal",
                           "subject_id": "svc.import", "document_id": DOCS[0],
                           "effect": "deny", "granted_at": "2026-01-01T00:00:00Z"})
     acl_path.write_text(json.dumps(pol, indent=1))
-    manifest = _build(synthetic_source, tmp_path / "snap")
-    by_id = {d["document_id"]: d for d in manifest["documents"]}
-    effects = {g["grant_id"]: g["effect"] for g in by_id[DOCS[0]]["acl"]["derived_grants"]}
-    assert effects == {"g1": "allow", "g2": "deny"}  # deny never reads as allow
+    out = tmp_path / "snap"
+    with pytest.raises(AuthorizationError) as exc:
+        _build(synthetic_source, out)
+    assert exc.value.context["denied_documents"] == [DOCS[0]]
+    assert not out.exists()  # the still-allowed DOCS[1] must not be written either
+    assert SYNTH_MARKER not in str(exc.value)
+    # The document that is NOT denied can still be imported on its own.
+    manifest = build_snapshot(
+        SourceLayout(synthetic_source), [DOCS[1]], tmp_path / "snap2", **BUILD_KW)
+    doc = manifest["documents"][0]
+    assert doc["acl"]["authorization_decision"]["effect"] == "allow"
+    assert verify_snapshot(tmp_path / "snap2")["ok"]
+
+
+def test_default_deny_when_no_grant_matches(synthetic_source, tmp_path):
+    """A principal with no matching grant at all (no allow, no deny) must be
+    denied by default - never implicitly authorized."""
+    acl_path = synthetic_source / "corpus/authz/acl-policy.json"
+    pol = json.loads(acl_path.read_text())
+    pol["grants"] = []  # remove the wildcard allow entirely
+    acl_path.write_text(json.dumps(pol, indent=1))
+    with pytest.raises(AuthorizationError) as exc:
+        _build(synthetic_source, tmp_path / "snap")
+    assert sorted(exc.value.context["denied_documents"]) == sorted(DOCS)
+
+
+def test_authorization_decision_recorded_and_independently_verified(synthetic_source, tmp_path):
+    out = tmp_path / "snap"
+    manifest = _build(synthetic_source, out)
+    for doc in manifest["documents"]:
+        decision = doc["acl"]["authorization_decision"]
+        assert decision["effect"] == "allow"
+        assert decision["resolution"] == "allow"
+        assert decision["matched_grant_ids"] == ["g1"]
+        assert "policy_time" not in decision  # excluded from content identity
+    assert manifest["authorization_context"]["policy_time"] == CREATED
+    report = verify_snapshot(out)
+    assert report["ok"], json.dumps(report["failures"], indent=1)
+
+    # Tamper: flip a stored authorization decision from allow to a fabricated
+    # deny-turned-allow resolution - the independent verifier must recompute
+    # from the snapshotted policy and catch the mismatch.
+    manifest_path = out / "snapshot-manifest.json"
+    tampered = json.loads(manifest_path.read_text())
+    tampered["documents"][0]["acl"]["authorization_decision"]["resolution"] = "explicit_deny"
+    manifest_path.write_text(json.dumps(tampered, indent=2, sort_keys=True))
+    report = verify_snapshot(out)
+    assert not report["ok"]
+    assert "authorization" in _codes(report)
+
 
 
 # -- snapshot tamper detection --------------------------------------------------

@@ -108,6 +108,42 @@ def cmd_snapshot_build(args) -> int:
     return 0
 
 
+def cmd_graph_build(args) -> int:
+    from .graph.build import build_graph
+    try:
+        manifest = build_graph(
+            Path(args.snapshot), Path(args.out),
+            expected_documents=args.expect_documents,
+            alias_out=Path(args.alias_out) if args.alias_out else None,
+        )
+    except KMGError as e:
+        print(f"graph build FAILED: {e}", file=sys.stderr)
+        return 1
+    print(f"graph build: {args.out}")
+    print(f"  graph_id: {manifest['graph_id']}")
+    print(f"  snapshot_id: {manifest['snapshot_id']}")
+    print(f"  documents: {manifest['document_count']}")
+    print(f"  nodes: {manifest['node_count']} {json.dumps(manifest['node_kinds'], sort_keys=True)}")
+    print(f"  edges: {manifest['edge_count']} {json.dumps(manifest['edge_kinds'], sort_keys=True)}")
+    print(f"  derivations: {json.dumps(manifest['derivations'], sort_keys=True)}")
+    if args.alias_out:
+        print(f"  alias table written: {args.alias_out}")
+    return 0
+
+
+def cmd_graph_verify(args) -> int:
+    from .graph import verify as gverify
+    report = gverify.verify_graph(Path(args.graph), Path(args.snapshot))
+    print(gverify.format_report(report))
+    if args.json_out:
+        p = Path(args.json_out)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
+                     encoding="utf-8")
+        print(f"  report written: {args.json_out}")
+    return 0 if report["ok"] else 1
+
+
 def cmd_snapshot_verify(args) -> int:
     report = verify_mod.verify_snapshot(Path(args.snapshot))
     print(verify_mod.format_report(report))
@@ -157,6 +193,28 @@ def main(argv: list[str] | None = None) -> int:
     p_verify.add_argument("--snapshot", required=True)
     p_verify.add_argument("--json-out")
     p_verify.set_defaults(func=cmd_snapshot_verify)
+
+    p_graph = sub.add_parser("graph", help="M1.5 structural graph operations")
+    graph_sub = p_graph.add_subparsers(dest="subcommand", required=True)
+    p_gbuild = graph_sub.add_parser(
+        "build", help="build the deterministic structural graph (no LLM)")
+    p_gbuild.add_argument("--snapshot", required=True,
+                          help="verified snapshot directory (M1.5 entry gate: full corpus)")
+    p_gbuild.add_argument("--out", required=True)
+    p_gbuild.add_argument("--expect-documents", type=int, default=50,
+                          help="refuse unless the snapshot holds exactly this many "
+                               "documents (default 50 = the full-corpus entry gate; "
+                               "pass the actual count for fixture/pilot work)")
+    p_gbuild.add_argument("--alias-out",
+                          help="also write the committable alias table here "
+                               "(identifiers and titles only; owner-approved)")
+    p_gbuild.set_defaults(func=cmd_graph_build)
+    p_gverify = graph_sub.add_parser(
+        "verify", help="independently verify a graph against its snapshot")
+    p_gverify.add_argument("--graph", required=True)
+    p_gverify.add_argument("--snapshot", required=True)
+    p_gverify.add_argument("--json-out")
+    p_gverify.set_defaults(func=cmd_graph_verify)
 
     args = parser.parse_args(argv)
     try:
