@@ -83,7 +83,12 @@ def cmd_snapshot_build(args) -> int:
         print("--principal and --authorization-mode are required (SPEC.md M1.3)",
               file=sys.stderr)
         raise SystemExit(2)
-    documents = [d.strip() for d in args.documents.split(",") if d.strip()]
+    if args.documents.strip().lower() == "all":
+        # Full-corpus build (the M1.5 entry gate): every stable_id in the
+        # upstream corpus manifest, in sorted order for determinism.
+        documents = sorted(layout.load_corpus_manifest().keys())
+    else:
+        documents = [d.strip() for d in args.documents.split(",") if d.strip()]
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         manifest = build_snapshot(
@@ -138,7 +143,8 @@ def main(argv: list[str] | None = None) -> int:
     p_build.add_argument("--generation")
     p_build.add_argument("--strategy")
     p_build.add_argument("--config")
-    p_build.add_argument("--documents", required=True, help="comma-separated stable_ids")
+    p_build.add_argument("--documents", required=True,
+                         help="comma-separated stable_ids, or 'all' for the full corpus")
     p_build.add_argument("--out", required=True)
     p_build.add_argument("--principal")
     p_build.add_argument("--authorization-mode")
