@@ -12,7 +12,8 @@ from pathlib import Path
 
 from ..contracts.models import identity_tuple, validate_chunk_record
 from ..errors import KMGError
-from .source import STATUS_AVAILABLE, STATUS_MISSING, SourceLayout, sha256_file
+from .authz import validate_acl_policy
+from .source import STATUS_AVAILABLE, STATUS_INVALID, STATUS_MISSING, SourceLayout, sha256_file
 
 
 def _fail(failures: list[dict], code: str, message: str) -> None:
@@ -186,6 +187,17 @@ def inspect_source(layout: SourceLayout) -> dict:
     dms_status, dms, dms_detail = layout.load_mock_dms_documents()
     id_status, ids, id_detail = layout.load_identities()
     acl_status, acl, acl_detail = layout.load_acl_policy()
+    # Structural validation of the policy itself (2026-11-01 review, second
+    # pass): mirrors the upstream KaryaMeshRAG validator field-for-field. A
+    # grant with an unknown effect/subject type, a duplicate grant_id, a
+    # malformed/naive timestamp, or a bad target makes the WHOLE policy
+    # unusable - downgraded to invalid here, never partially trusted.
+    grant_failures: list[str] = []
+    if acl_status == STATUS_AVAILABLE:
+        grant_failures = validate_acl_policy(acl, known_documents=corpus)
+        if grant_failures:
+            acl_status = STATUS_INVALID
+            acl_detail = f"{len(grant_failures)} grant validation failure(s)"
     report["revision_metadata"] = {
         "status": dms_status, "detail": dms_detail,
         "documents": len(dms) if isinstance(dms, list) else None,
@@ -204,9 +216,10 @@ def inspect_source(layout: SourceLayout) -> dict:
                        "principals": len((ids or {}).get("principals", {})) if id_status == STATUS_AVAILABLE else None,
                        "sha256": sha256_file(identities_path) if id_status == STATUS_AVAILABLE else None},
         "policy": {"status": acl_status, "detail": acl_detail,
-                   "policy_version": (acl or {}).get("policy_version") if acl_status == STATUS_AVAILABLE else None,
-                   "grants": len((acl or {}).get("grants", [])) if acl_status == STATUS_AVAILABLE else None,
-                   "sha256": sha256_file(acl_path) if acl_status == STATUS_AVAILABLE else None},
+                   "policy_version": (acl or {}).get("policy_version") if acl_status != STATUS_MISSING else None,
+                   "grants": len((acl or {}).get("grants", [])) if acl_status != STATUS_MISSING else None,
+                   "sha256": sha256_file(acl_path) if acl_status != STATUS_MISSING else None,
+                   "validation_failures": grant_failures[:10]},
         "note": "missing or invalid policy is NOT public; access is denied by default",
     }
     for label, status in (("mock_dms documents", dms_status),

@@ -95,6 +95,8 @@ def cmd_snapshot_build(args) -> int:
             layout, documents, Path(args.out),
             principal=principal, authorization_mode=mode, created_at=created_at,
             allow_unignored_out=args.allow_unignored_out,
+            document_mode=args.document_mode,
+            archive_mode_authorized=args.archive_mode_authorized,
         )
     except KMGError as e:
         print(f"snapshot build FAILED: {e}", file=sys.stderr)
@@ -104,6 +106,7 @@ def cmd_snapshot_build(args) -> int:
     print(f"  snapshot_id: {manifest['snapshot_id']}")
     print(f"  documents: {manifest['document_count']} ({manifest['chunk_count']} chunks)")
     print(f"  capabilities: {json.dumps(caps, sort_keys=True)}")
+    print(f"  document_mode: {manifest['authorization_context']['document_mode']}")
     print(f"  validation_status: {manifest['validation_status']}")
     return 0
 
@@ -187,6 +190,18 @@ def main(argv: list[str] | None = None) -> int:
     p_build.add_argument("--allow-unignored-out", action="store_true",
                          help="permit an output path git would commit (dangerous: "
                               "snapshots hold real SOP text and the repo is public)")
+    p_build.add_argument("--document-mode", default="current",
+                         choices=["current", "historical_archive"],
+                         help="'current' (default) additionally requires every "
+                              "document to be a currently eligible SOP (approved, "
+                              "not withdrawn) - an ACL allow alone is not enough; "
+                              "'historical_archive' deliberately bypasses that gate "
+                              "for an explicitly authorized archival/structural "
+                              "import (requires --archive-mode-authorized)")
+    p_build.add_argument("--archive-mode-authorized", action="store_true",
+                         help="required alongside --document-mode historical_archive; "
+                              "confirms a deliberate, recorded decision to import "
+                              "lifecycle-ineligible (e.g. withdrawn) documents")
     p_build.set_defaults(func=cmd_snapshot_build)
 
     p_verify = snap_sub.add_parser("verify", help="independently verify a snapshot")

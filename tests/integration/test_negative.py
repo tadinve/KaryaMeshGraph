@@ -14,6 +14,7 @@ from karyameshgraph.errors import (
     GenerationMismatchError,
     HashMismatchError,
     KMGError,
+    LifecycleIneligibleError,
     MalformedRecordError,
     SnapshotStateError,
 )
@@ -219,20 +220,50 @@ def test_invalid_authz_json_fails_closed(synthetic_source, tmp_path):
         _build(synthetic_source, tmp_path / "s")
 
 
-def test_withdrawn_document_not_eligible_and_no_leak(synthetic_source, tmp_path):
+def test_withdrawn_document_blocked_under_current_mode(synthetic_source, tmp_path):
+    """SPEC.md §5.7 (2026-11-01 review, second pass): an ACL allow is NOT
+    lifecycle eligibility. The default document_mode='current' must refuse
+    the whole import for a withdrawn document even though the wildcard ACL
+    grant still allows it - the two axes are never silently mixed."""
     dms = synthetic_source / "data/mock_dms/documents.json"
     docs = json.loads(dms.read_text())
     docs[1]["lifecycle_state"] = "WITHDRAWN"
     docs[1]["withdrawn_at"] = "2026-10-20T00:00:00Z"
     dms.write_text(json.dumps(docs, indent=1))
     out = tmp_path / "snap"
-    manifest = _build(synthetic_source, out)
+    with pytest.raises(LifecycleIneligibleError) as exc:
+        _build(synthetic_source, out)
+    assert exc.value.context["ineligible_documents"] == [DOCS[1]]
+    assert not out.exists()
+    assert SYNTH_MARKER not in str(exc.value)
+
+
+def test_withdrawn_document_importable_under_authorized_archive_mode(synthetic_source, tmp_path):
+    """The SAME withdrawn document can be imported deliberately for archival/
+    structural-analysis purposes, but only with explicit
+    document_mode='historical_archive' + archive_mode_authorized=True - and
+    the ACL decision (allow) and lifecycle status (ineligible) are both
+    still recorded honestly, never mixed into one semantic."""
+    dms = synthetic_source / "data/mock_dms/documents.json"
+    docs = json.loads(dms.read_text())
+    docs[1]["lifecycle_state"] = "WITHDRAWN"
+    docs[1]["withdrawn_at"] = "2026-10-20T00:00:00Z"
+    dms.write_text(json.dumps(docs, indent=1))
+    out = tmp_path / "snap"
+
+    # Requesting the mode without the explicit authorization flag is refused.
+    with pytest.raises(AuthorizationError):
+        _build(synthetic_source, out, document_mode="historical_archive")
+    assert not out.exists()
+
+    manifest = _build(synthetic_source, out, document_mode="historical_archive",
+                      archive_mode_authorized=True)
     by_id = {d["document_id"]: d for d in manifest["documents"]}
     assert by_id[DOCS[1]]["eligibility"]["status"] == "not_eligible_offline_simulated"
-    # Lifecycle (approval/withdrawal) and ACL authorization are independent
-    # axes (SPEC.md §5.7): withdrawal blocks *extraction* eligibility, not
-    # the import-time ACL decision, which the wildcard allow still grants.
     assert by_id[DOCS[1]]["acl"]["authorization_decision"]["effect"] == "allow"
+    ctx = manifest["authorization_context"]
+    assert ctx["document_mode"] == "historical_archive"
+    assert ctx["archive_mode_authorized"] is True
     assert SYNTH_MARKER not in json.dumps(manifest)  # metadata only, no content
     assert verify_snapshot(out)["ok"]
 
@@ -272,6 +303,88 @@ def test_default_deny_when_no_grant_matches(synthetic_source, tmp_path):
     assert sorted(exc.value.context["denied_documents"]) == sorted(DOCS)
 
 
+# -- ACL structural validation (2026-11-01 review, second pass) ----------------
+# Each scenario corrupts one real-shaped grant field and asserts the WHOLE
+# build refuses closed with a distinct "policy itself is broken" error,
+# never a silent per-grant skip or an implicit allow.
+
+def _corrupt_acl(root, mutate):
+    acl_path = root / "corpus/authz/acl-policy.json"
+    pol = json.loads(acl_path.read_text())
+    mutate(pol["grants"][0])
+    acl_path.write_text(json.dumps(pol, indent=1))
+
+
+def test_malformed_policy_unknown_effect_fails_closed(synthetic_source, tmp_path):
+    _corrupt_acl(synthetic_source, lambda g: g.__setitem__("effect", "maybe"))
+    out = tmp_path / "snap"
+    with pytest.raises(AuthorizationError) as exc:
+        _build(synthetic_source, out)
+    assert "unknown effect" in str(exc.value.context["failures"])
+    assert not out.exists()
+    assert SYNTH_MARKER not in str(exc.value)
+
+
+def test_malformed_policy_unknown_subject_type_fails_closed(synthetic_source, tmp_path):
+    _corrupt_acl(synthetic_source, lambda g: g.__setitem__("subject_type", "robot"))
+    with pytest.raises(AuthorizationError) as exc:
+        _build(synthetic_source, tmp_path / "snap")
+    assert "unknown subject_type" in str(exc.value.context["failures"])
+
+
+def test_malformed_policy_duplicate_grant_id_fails_closed(synthetic_source, tmp_path):
+    acl_path = synthetic_source / "corpus/authz/acl-policy.json"
+    pol = json.loads(acl_path.read_text())
+    dup = dict(pol["grants"][0])
+    dup["document_id"] = DOCS[1]
+    pol["grants"].append(dup)  # same grant_id as grants[0]
+    acl_path.write_text(json.dumps(pol, indent=1))
+    with pytest.raises(AuthorizationError) as exc:
+        _build(synthetic_source, tmp_path / "snap")
+    assert "duplicate grant_id" in str(exc.value.context["failures"])
+
+
+def test_malformed_policy_naive_timestamp_fails_closed(synthetic_source, tmp_path):
+    _corrupt_acl(synthetic_source, lambda g: g.__setitem__("granted_at", "2026-01-01T00:00:00"))
+    with pytest.raises(AuthorizationError) as exc:
+        _build(synthetic_source, tmp_path / "snap")
+    assert "timezone-aware" in str(exc.value.context["failures"])
+
+
+def test_malformed_policy_invalid_interval_fails_closed(synthetic_source, tmp_path):
+    """expires_at that precedes granted_at - a backwards validity interval."""
+    _corrupt_acl(synthetic_source, lambda g: g.update({
+        "granted_at": "2026-06-01T00:00:00+00:00", "expires_at": "2026-01-01T00:00:00+00:00"}))
+    with pytest.raises(AuthorizationError) as exc:
+        _build(synthetic_source, tmp_path / "snap")
+    assert "expires_at must follow granted_at" in str(exc.value.context["failures"])
+
+
+def test_malformed_policy_missing_field_fails_closed(synthetic_source, tmp_path):
+    _corrupt_acl(synthetic_source, lambda g: g.pop("effect"))
+    with pytest.raises(AuthorizationError) as exc:
+        _build(synthetic_source, tmp_path / "snap")
+    assert "missing required field" in str(exc.value.context["failures"])
+
+
+def test_expired_grant_denies_import(synthetic_source, tmp_path):
+    """A grant whose expires_at is already at/before the import's policy
+    time (created_at) must deny, not silently fall back to unrestricted."""
+    _corrupt_acl(synthetic_source, lambda g: g.__setitem__(
+        "expires_at", "2026-10-31T00:00:00+00:00"))  # == CREATED: exclusive bound
+    with pytest.raises(AuthorizationError) as exc:
+        _build(synthetic_source, tmp_path / "snap")
+    assert sorted(exc.value.context["denied_documents"]) == sorted(DOCS)
+
+
+def test_revoked_grant_denies_import(synthetic_source, tmp_path):
+    _corrupt_acl(synthetic_source, lambda g: g.__setitem__(
+        "revoked_at", "2026-10-31T00:00:00+00:00"))  # == CREATED: revoked from that instant
+    with pytest.raises(AuthorizationError) as exc:
+        _build(synthetic_source, tmp_path / "snap")
+    assert sorted(exc.value.context["denied_documents"]) == sorted(DOCS)
+
+
 def test_authorization_decision_recorded_and_independently_verified(synthetic_source, tmp_path):
     out = tmp_path / "snap"
     manifest = _build(synthetic_source, out)
@@ -297,8 +410,23 @@ def test_authorization_decision_recorded_and_independently_verified(synthetic_so
     assert "authorization" in _codes(report)
 
 
+def test_verify_catches_tampered_policy_introducing_invalid_grant(synthetic_source, tmp_path):
+    """Post-build tamper of the snapshotted acl-policy.json with a
+    structurally invalid grant must be caught by the independent verifier,
+    not just by the builder (which only validates at build time)."""
+    out = tmp_path / "snap"
+    _build(synthetic_source, out)
+    assert verify_snapshot(out)["ok"]
+    acl_path = out / "authz/acl-policy.json"
+    pol = json.loads(acl_path.read_text())
+    pol["grants"][0]["effect"] = "maybe"
+    acl_path.write_text(json.dumps(pol, indent=1))
+    report = verify_snapshot(out)
+    assert not report["ok"]
+    assert "authorization" in _codes(report)
 
-# -- snapshot tamper detection --------------------------------------------------
+
+
 
 def test_verification_catches_tampered_chunks(synthetic_source, tmp_path):
     out = _good_snapshot(synthetic_source, tmp_path)

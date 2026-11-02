@@ -1,13 +1,24 @@
 # M1 Evidence Report — read-only KaryaMeshRAG artifact integration
 
-**Status: FINAL, corrected 2026-11-01.** Sections 2 and 7 below are updated
-by a 2026-11-02 review that found two real defects in the original M1
-implementation (not in the test suite, which never exercised real PDF bytes
-end-to-end and never exercised a denied/default-deny document). Both are
+**Status: FINAL, corrected 2026-11-01 (two review passes, same calendar
+day).** All work in this report, including §2c below, was executed on
+**2026-11-01, America/Los_Angeles (PST, UTC-8)** — the session's actual
+local date/timezone, confirmed against both `date` on the working machine
+and the `git log` commit timestamps (`...T13:43:42-08:00` for the first
+pass). An earlier draft of the companion `evidence/m1_5-report.md`
+mislabeled its second-pass work "2026-11-02"; that was a reasoning slip,
+corrected throughout this review (§5 below and the companion report).
+
+Sections 2 and 7 below are updated by a first review pass that found two
+real defects in the original M1 implementation (not in the test suite,
+which never exercised real PDF bytes end-to-end and never exercised a
+denied/default-deny document), and a second review pass (§2c) that aligned
+offline ACL evaluation with the upstream KaryaMeshRAG validator and
+separated lifecycle eligibility from ACL authorization. All three are
 fixed, independently re-verified against the real upstream checkout, and
-covered by new regression tests. See **§2a** and **§2b** for the corrected
-findings; the rest of this report (hashing conventions, snapshot/verify
-contract, test counts) is unchanged and still accurate.
+covered by new regression tests. See **§2a**, **§2b**, and **§2c** for the
+corrected findings; the rest of this report (hashing conventions,
+snapshot/verify contract) is unchanged and still accurate.
 
 ## 1. Repository and environment
 
@@ -46,14 +57,14 @@ the local checkout; no upstream file modified):
    (`is_simulated: true`); `supersedes` NULL for all 50 rows; no per-document
    `acl_policy_ref` (doc→grant join is derived); registry
    `identities-2026-11-01.1`, policy `acl-2026-11-01.1` (4 principals,
-   **7 grants — corrected 2026-11-02, see §2b**; the original "8 grants" was
+   **7 grants — corrected 2026-11-01, see §2b**; the original "8 grants" was
    a transcription error, never matched by the machine-readable
    `evidence/inspect-report.json`, which always recorded 7).
 5. **Structural layer** ~80–85% deterministically parseable from chunks;
    in-corpus citation resolution requires the alias table
    (`corpus/manifest.json` `source_document_number` provides it).
 
-## 2a. Correction — PDF byte verification (2026-11-02)
+## 2a. Correction — PDF byte verification (2026-11-01)
 
 **Finding:** `src/karyameshgraph/ingest/inspect.py` built each original PDF's
 path as `layout.root / "data" / "originals" / entry["file"]`, but
@@ -82,7 +93,7 @@ filename, which is why the fixture suite never caught the real bug (the
 double-prefixed and bare-filename cases happened to collide under the old
 buggy code).
 
-**Re-verified against the real upstream checkout (2026-11-02):**
+**Re-verified against the real upstream checkout (2026-11-01):**
 
 ```bash
 uv run karyameshgraph source inspect --source-root ../KaryaMeshScratch \
@@ -95,7 +106,7 @@ uv run karyameshgraph source inspect --source-root ../KaryaMeshScratch \
 presence is now actually demonstrated by a recomputed SHA-256 over the raw
 file bytes, not inferred from the fact that files existed somewhere on disk.
 
-## 2b. Correction — document-level ACL enforcement (2026-11-02)
+## 2b. Correction — document-level ACL enforcement (2026-11-01)
 
 **Finding:** the snapshot builder validated that the principal was an
 *active* entry in `corpus/authz/identities.json`, then recorded whichever
@@ -152,9 +163,11 @@ denied document while an unaffected document can still be imported
 all is a default deny, never an implicit allow
 (`test_default_deny_when_no_grant_matches`); a withdrawn document's
 *lifecycle* ineligibility is independent of its *ACL* decision
-(`test_withdrawn_document_not_eligible_and_no_leak`); the decision is
-recorded, excluded from content identity, and independently re-verified,
-with tamper detection exercised directly
+(`test_withdrawn_document_blocked_under_current_mode` /
+`test_withdrawn_document_importable_under_authorized_archive_mode` — renamed
+and split further in §2c below); the decision is recorded, excluded from
+content identity, and independently re-verified, with tamper detection
+exercised directly
 (`test_authorization_decision_recorded_and_independently_verified`).
 Disabled-principal and unknown-principal coverage already existed
 (`test_unknown_and_disabled_principals_fail`) and is unchanged.
@@ -172,6 +185,97 @@ section now also records the content SHA-256 of `identities.json`
 (`8ab997554f15eaf5670d7891d1e9237655d30210293bf97ba9621e541c2310e6`)
 alongside their version strings, so a silent content edit under an
 unchanged version string is independently detectable.
+
+## 2c. Second review pass (2026-11-01) — ACL validation alignment and
+lifecycle/ACL separation
+
+Reviewing commit `163a275`, the owner identified that §2b's ACL enforcement,
+while real, was not as strict as the upstream KaryaMeshRAG validator, and
+that an ACL `allow` was being treated as sufficient on its own, without a
+separate lifecycle-eligibility gate. Both are now fixed.
+
+**1. ACL policy structural validation now mirrors upstream exactly.** The
+real upstream implementation (`src/karyamesh/authz/policy.py:AclPolicy` in
+the `KaryaMeshScratch` checkout) was located and read; this project's new
+`validate_acl_policy()`
+([ingest/authz.py](../src/karyameshgraph/ingest/authz.py)) mirrors its
+validation field-for-field: unknown effect, unknown/incomplete subject
+type, a target that is not *exactly one* of `document_id`/`document_series`,
+a duplicate `grant_id`, a non-ISO-8601 or timezone-naive timestamp, and
+`expires_at`/`revoked_at` not following `granted_at`. **A single bad grant
+now invalidates the entire policy** (default-deny for every document) -
+never a silent per-grant skip. `source inspect` downgrades `acl.policy.status`
+to `invalid` and lists the failures (capped) in
+`evidence/inspect-report.json`; `snapshot build` raises `AuthorizationError`
+and refuses the whole import before touching any chunk line; `snapshot
+verify` independently re-validates the snapshotted policy artifact
+(structural checks only - intentionally not the referential "is this a
+known document" check, since the snapshot only embeds its own partial
+document selection, documented at the call site).
+
+Two real fail-open bugs from the first pass were also found and fixed while
+implementing this:
+- `evaluate_document_access` silently fell back to live
+  `datetime.now(timezone.utc)` when the import's `policy_time_iso` failed
+  to parse - breaking reproducibility and potentially resurrecting access
+  that the real, intended policy time would have denied. It now fails
+  closed with a dedicated `invalid_policy_time` resolution.
+- `_grant_active` silently *ignored* a malformed `expires_at`/`revoked_at`,
+  treating the grant as unrestricted rather than denying it. It now treats
+  any grant carrying an unparseable timestamp as inactive.
+
+**2. Lifecycle eligibility is now a separate, independently enforced axis.**
+An ACL `allow` never again implies a document is a currently eligible
+(approved, not withdrawn) SOP. `build_snapshot` gained `document_mode`
+(`"current"` default, or `"historical_archive"`) and `archive_mode_authorized`:
+`"current"` requires every requested document to ALSO resolve
+`eligibility_for(...) == "eligible_offline_simulated"`, refusing the whole
+import (`LifecycleIneligibleError`) otherwise - even though the real
+upstream wildcard grant (`G-001`) would still ACL-allow a withdrawn
+document like `CRS-SOP-050`. `"historical_archive"` deliberately bypasses
+only the eligibility gate (the ACL gate still applies), and is refused
+outright unless the caller also passes `archive_mode_authorized=True` -
+this is exactly the deliberate, explicitly authorized archival-import
+boundary the review asked for, mirroring the upstream secure-retrieval
+design's "authorized pool = eligible ∧ allowed". `snapshot verify`
+independently recomputes eligibility per document under `"current"` mode
+and checks that `"historical_archive"` is only ever recorded alongside
+`archive_mode_authorized: true`.
+
+**Confirmed against the real upstream checkout:** `CRS-SOP-050`'s real
+`mock_dms` lifecycle record is `WITHDRAWN`
+(`withdrawn_at: "2026-10-12T09:00:00Z"`). Requesting it under the default
+`document_mode="current"` now refuses
+(`LifecycleIneligibleError: ineligible_documents=['CRS-SOP-050']`) even
+though `compliance.officer`'s wildcard ACL grant still allows it. The M1.5
+full-corpus structural graph (`evidence/m1_5-report.md`) is exactly the
+deliberate archival case: it deliberately imports all 50 documents,
+including the withdrawn one, under `document_mode="historical_archive"`
+with `archive_mode_authorized=True` - recorded explicitly in
+`authorization_context`, never silently mixed with "currently eligible for
+production access."
+
+**New regression tests:** 14 new tests across
+[tests/unit/test_authz.py](../tests/unit/test_authz.py) (structural
+validation of every malformed-field case; expired/revoked-grant evaluation;
+the malformed-`policy_time` fail-closed fix; a dedicated test pinning that
+there is no hidden "historical policy-time bypass" - the decision changes
+only at the documented `revoked_at`/`expires_at` boundary, nowhere else) and
+[tests/integration/test_negative.py](../tests/integration/test_negative.py)
+(malformed real-shaped policies: unknown effect, unknown subject type,
+duplicate grant_id, naive timestamp, backwards validity interval, missing
+field; expired-grant and revoked-grant denial at the snapshot-build level;
+post-build policy tampering caught by the independent verifier; the
+withdrawn-document current-vs-archive-mode split). Real-corpus coverage
+added in
+[tests/integration/test_real_source.py](../tests/integration/test_real_source.py):
+`test_withdrawn_document_blocked_under_current_mode_real` against the real
+`CRS-SOP-050`.
+
+**Test counts after this pass:** fixture-only `uv run pytest -q`: **104
+passed, 4 skipped** (0 failed). Real-source
+`KMG_REAL_SOURCE_ROOT=../KaryaMeshScratch uv run pytest -q`: **108 passed**
+(0 failed, 0 skipped).
 
 ## 3. Commands to reproduce (M1 CLI)
 
@@ -209,6 +313,11 @@ KMG_REAL_SOURCE_ROOT=../KaryaMeshScratch uv run pytest -q
 - No test error message or report contains source text (asserted directly
   via the `SYNTH_MARKER` leak tests).
 
+> **Note (2026-11-01, second pass):** the counts above are from the
+> *original* M1 implementation, before the §2a/§2b/§2c corrections. The
+> current, final counts are in §2c: fixture-only **104 passed, 4 skipped**;
+> real-source **108 passed**, 0 failed, 0 skipped.
+
 ## 5. Real pilot import — executed 2026-11-01
 
 All three CLI commands ran against the live `../KaryaMeshScratch` checkout:
@@ -236,6 +345,15 @@ All three CLI commands ran against the live `../KaryaMeshScratch` checkout:
 The snapshot lives under `data/snapshots/pilot-v2` — a gitignored path
 (enforced by the builder's gitignore guard), so no SOP text can be staged.
 
+> **Note (2026-11-01, second pass):** `snapshot_id` above is from the
+> *original* build, before the PDF-path fix and the ACL/lifecycle fields
+> were added to every document record (which are content-hashed). The
+> current pilot `snapshot_id` is
+> `ksnap-bd90f343864e084e75d614f17993d93e310e3391c2610a08bac832aa40bb75c4`
+> (re-verified OK, §2c); the ID changing is expected and correct — the
+> content genuinely changed (the document records now carry a real,
+> enforced `authorization_decision`).
+
 ## 6. Known limitations
 
 - Every snapshot is `chunk_only`: evidence spans are `CHUNK_VERIFIED` at
@@ -259,7 +377,7 @@ The snapshot lives under `data/snapshots/pilot-v2` — a gitignored path
   upstream — a recorded risk for the regeneration task.
 - Upstream git tree was dirty at inspection; snapshots record commit + dirty
   flag rather than assuming a clean tree.
-- (2026-11-02) The local macOS/Drive working copy periodically regenerates
+- (2026-11-01) The local macOS/Drive working copy periodically regenerates
   stray `Icon` resource-fork files inside `data/` subdirectories (outside
   this project's control). `snapshot verify`'s undeclared-file tamper check
   correctly flags these as failures; they are not snapshot corruption and
@@ -275,7 +393,7 @@ The snapshot lives under `data/snapshots/pilot-v2` — a gitignored path
   shows only code/config/docs — no SOP content stageable. Nothing is
   committed yet; the staged-file inspection repeats before every actual
   commit (SPEC §0.8).
-- **M1: PASS (corrected 2026-11-02).** All four deliverables — source
+- **M1: PASS (corrected 2026-11-01).** All four deliverables — source
   inspector, snapshot builder, independent verifier, negative-test suite —
   implemented and exercised against the real upstream corpus. The original
   PASS verdict rested on two defects that have now been found, fixed, and

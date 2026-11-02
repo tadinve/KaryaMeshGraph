@@ -10,6 +10,14 @@ Fail-closed rules implemented here:
   (``ingest.authz``, explicit deny > allow > default deny); a principal that
   does not resolve to ``allow`` for a document never has that document's
   content copied - the whole build refuses closed instead (SPEC.md M5);
+- an ACL policy that fails structural validation (unknown effect/subject
+  type, duplicate grant_id, malformed/naive timestamp, bad target) is
+  unusable as a WHOLE policy, never partially trusted;
+- ``document_mode="current"`` (default) ALSO requires every document to be
+  a currently eligible SOP (approved, not withdrawn) - an ACL allow is a
+  separate axis and never substitutes for lifecycle eligibility;
+  ``document_mode="historical_archive"`` bypasses that gate only under
+  explicit ``archive_mode_authorized=True`` (SPEC.md §5.7);
 - every document is labeled with its actual provenance capability
   (``chunk_only`` today); ``extraction_eligible`` is false for chunk_only;
 - files are written into a temporary sibling directory and renamed into
@@ -41,10 +49,18 @@ from ..errors import (
     AuthorizationError,
     DuplicateIdentityError,
     HashMismatchError,
+    LifecycleIneligibleError,
     MalformedRecordError,
     SnapshotStateError,
 )
-from .authz import EFFECT_ALLOW, evaluate_document_access
+from .authz import (
+    DOCUMENT_MODE_CURRENT,
+    DOCUMENT_MODES,
+    DOCUMENT_MODE_HISTORICAL_ARCHIVE,
+    EFFECT_ALLOW,
+    evaluate_document_access,
+    validate_acl_policy,
+)
 from .source import STATUS_AVAILABLE, SourceLayout, sha256_file
 from .verify import verify_content
 
@@ -117,12 +133,43 @@ def build_snapshot(
     authorization_mode: str,
     created_at: str,
     allow_unignored_out: bool = False,
+    document_mode: str = DOCUMENT_MODE_CURRENT,
+    archive_mode_authorized: bool = False,
 ) -> dict:
     """Build and internally verify a snapshot; returns the written manifest.
 
     Raises a typed error (and writes ``<out>.failed.json``) instead of ever
     leaving a partially-written snapshot at ``out_dir``.
+
+    ``document_mode`` (SPEC.md §5.7, 2026-11-01 review second pass) gates
+    LIFECYCLE eligibility independently of the ACL decision above - "an ACL
+    allow does not itself make a withdrawn or ineffective SOP eligible":
+
+    - ``"current"`` (default): every requested document must ALSO be a
+      currently eligible SOP (``eligibility_for`` resolves to
+      ``eligible_offline_simulated``: approved, not withdrawn). A document
+      that is ACL-allowed but lifecycle-ineligible still refuses the whole
+      build (``LifecycleIneligibleError``) - this is a snapshot of the
+      currently-in-force, authorized document pool, never a mix of the two.
+    - ``"historical_archive"``: deliberately bypasses the eligibility gate
+      (the ACL gate still applies) for an explicitly authorized archival or
+      structural-analysis import that intentionally wants withdrawn/
+      ineligible documents too - e.g. M1.5's full-corpus structural graph,
+      which analyzes every document's STRUCTURE regardless of its current
+      production eligibility. Requires ``archive_mode_authorized=True``;
+      requesting this mode without it is refused (``AuthorizationError``),
+      so the bypass can never happen by accident.
     """
+    if document_mode not in DOCUMENT_MODES:
+        raise SnapshotStateError("unknown document_mode", mode=document_mode,
+                                 supported=list(DOCUMENT_MODES))
+    if document_mode == DOCUMENT_MODE_HISTORICAL_ARCHIVE and not archive_mode_authorized:
+        raise AuthorizationError(
+            "document_mode='historical_archive' requires explicit "
+            "archive_mode_authorized=True; refusing to import lifecycle-"
+            "ineligible documents without deliberate, recorded authorization",
+            document_mode=document_mode,
+        )
     out_dir = Path(out_dir)
     if out_dir.exists():
         raise SnapshotStateError("snapshot output directory already exists; refusing to overwrite",
@@ -159,12 +206,38 @@ def build_snapshot(
                                 recorded=fp["sha256"], actual=actual_sha)
 
     corpus = layout.load_corpus_manifest()
+    # A document the corpus manifest doesn't even know about is a plain
+    # "document does not exist" failure (ArtifactMissingError), never an
+    # authorization or eligibility question - check this FIRST so a bogus
+    # document_id never reaches (and is never mischaracterized by) the ACL
+    # or lifecycle gates below.
+    unknown_documents = sorted(d for d in documents if d not in corpus)
+    if unknown_documents:
+        raise ArtifactMissingError("document(s) absent from corpus/manifest.json",
+                                   documents=unknown_documents)
     source_manifest_sha = sha256_file(layout.frozen_manifest_path)
     frozen_pdfs = (manifest_src.get("inputs") or {}).get("pdf_sha256") or {}
     dms_status, dms_docs, _ = layout.load_mock_dms_documents()
     dms_by_id = ({d.get("document_id"): d for d in dms_docs}
                  if dms_status == STATUS_AVAILABLE and isinstance(dms_docs, list) else {})
     acl_status, acl, _ = layout.load_acl_policy()
+
+    # Structural policy validation (2026-11-01 review, second pass): a
+    # policy with an unknown effect/subject type, a duplicate grant_id, a
+    # malformed/naive timestamp, or a bad target is UNUSABLE as a whole -
+    # never partially trusted. Downgrading it to "unusable" here (acl=None)
+    # makes every document resolve to default_deny below, which the
+    # existing fail-closed `denied` check already refuses the build on -
+    # but we raise a distinctly labeled error first so an operator sees
+    # "the policy itself is broken" rather than "every document was denied".
+    if acl_status == STATUS_AVAILABLE:
+        policy_failures = validate_acl_policy(acl, known_documents=corpus)
+        if policy_failures:
+            raise AuthorizationError(
+                "ACL policy fails structural validation; refusing import - "
+                "the whole policy is unusable, not just the offending grant(s)",
+                failures=policy_failures[:10], failure_count=len(policy_failures),
+            )
 
     # Document-level authorization (SPEC.md M5, 2026-11-01 review finding):
     # an active principal is NOT automatically authorized for every document.
@@ -192,6 +265,28 @@ def build_snapshot(
             "content is copied for a denied document",
             principal=principal, denied_documents=denied,
         )
+
+    # Lifecycle eligibility (SPEC.md §5.7, 2026-11-01 review second pass):
+    # an ACL allow is NOT lifecycle eligibility. Under the default "current"
+    # mode, every requested document must ALSO be a currently eligible SOP
+    # (approved, not withdrawn) - independent of, and in addition to, the
+    # ACL decision above. "historical_archive" deliberately bypasses this
+    # gate only when the caller explicitly authorized it (checked earlier).
+    if document_mode == DOCUMENT_MODE_CURRENT:
+        ineligible = []
+        for sid in sorted(documents):
+            lifecycle = dms_by_id.get(sid)
+            if eligibility_for(lifecycle)["status"] != "eligible_offline_simulated":
+                ineligible.append(sid)
+        if ineligible:
+            raise LifecycleIneligibleError(
+                "one or more requested documents are not currently eligible "
+                "SOPs (not approved, or withdrawn); an ACL allow does not "
+                "make them eligible - pass document_mode='historical_archive' "
+                "with archive_mode_authorized=True for a deliberate archival "
+                "import if that is actually intended",
+                ineligible_documents=ineligible, document_mode=document_mode,
+            )
 
     # Full-fidelity availability. Importing element/section artifacts is NOT
     # implemented yet, so a document with a demonstrably v2-compatible full
@@ -334,6 +429,12 @@ def build_snapshot(
                 # authorization_decision was evaluated at this instant.
                 "policy_time": created_at,
                 "is_production_authorization": False,
+                # Lifecycle-eligibility gate (SPEC.md §5.7): "current" means
+                # every document here is ALSO a currently eligible SOP, not
+                # merely ACL-allowed; "historical_archive" deliberately
+                # bypassed that gate under explicit authorization.
+                "document_mode": document_mode,
+                "archive_mode_authorized": archive_mode_authorized,
             },
             "created_at": created_at,  # informational; excluded from snapshot_id
             "eligibility_evaluated_at": created_at,

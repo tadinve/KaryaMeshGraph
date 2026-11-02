@@ -13,6 +13,7 @@ import os
 
 import pytest
 
+from karyameshgraph.errors import LifecycleIneligibleError
 from karyameshgraph.ingest.inspect import inspect_source
 from karyameshgraph.ingest.snapshot import build_snapshot
 from karyameshgraph.ingest.source import SourceLayout
@@ -24,6 +25,7 @@ pytestmark = pytest.mark.skipif(
 
 EXPECTED_SECTION_SHA = "720d36e80e0b7b5599ca936b922c9be36dc2fb26c30d205e2d13fc22f0e4b6aa"
 PILOT_DOCS = ["CRS-SOP-009", "CRS-SOP-018"]
+WITHDRAWN_DOC = "CRS-SOP-050"  # real upstream mock_dms: lifecycle_state WITHDRAWN
 
 
 def test_inspect_real_v2():
@@ -33,6 +35,19 @@ def test_inspect_real_v2():
     assert report["chunks_file"]["documents"] == 50
     assert report["full_fidelity"]["verdict"] == "chunk_only"
     assert report["ok"], report["failures"]
+
+
+def test_withdrawn_document_blocked_under_current_mode_real(tmp_path):
+    """The real upstream CRS-SOP-050 is WITHDRAWN; default document_mode
+    must refuse it even though compliance.officer's wildcard ACL grant
+    would otherwise allow it (SPEC.md §5.7, 2026-11-01 review second pass)."""
+    with pytest.raises(LifecycleIneligibleError) as exc:
+        build_snapshot(
+            SourceLayout(ROOT), [WITHDRAWN_DOC], tmp_path / "s",
+            principal="compliance.officer", authorization_mode="offline_simulation",
+            created_at="2026-10-31T00:00:00+00:00",
+        )
+    assert exc.value.context["ineligible_documents"] == [WITHDRAWN_DOC]
 
 
 def test_pilot_snapshot_roundtrip(tmp_path):
@@ -61,10 +76,16 @@ def test_full_corpus_graph(tmp_path):
     all_docs = sorted(layout.load_corpus_manifest().keys())
     assert len(all_docs) == 50
     snap = tmp_path / "full-v2"
+    # M1.5 is a structural/analytical graph over EVERY document regardless
+    # of current production eligibility (CRS-SOP-050 is WITHDRAWN) - this is
+    # exactly the deliberate, explicitly authorized archival-import case
+    # SPEC.md §5.7 describes, never a silent mix of "ACL-allowed" with
+    # "currently eligible" (2026-11-01 review, second pass).
     build_snapshot(
         layout, all_docs, snap,
         principal="compliance.officer", authorization_mode="offline_simulation",
         created_at="2026-11-01T00:00:00+00:00",
+        document_mode="historical_archive", archive_mode_authorized=True,
     )
     graph = tmp_path / "graph-v2"
     manifest = build_graph(snap, graph, expected_documents=50)

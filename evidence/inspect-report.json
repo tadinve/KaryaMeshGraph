@@ -13,7 +13,8 @@
       "grants": 7,
       "policy_version": "acl-2026-11-01.1",
       "sha256": "8ab997554f15eaf5670d7891d1e9237655d30210293bf97ba9621e541c2310e6",
-      "status": "available"
+      "status": "available",
+      "validation_failures": []
     }
   },
   "chunks_file": {

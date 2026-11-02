@@ -34,7 +34,14 @@ from ..contracts.models import (
     validate_chunk_record,
 )
 from ..errors import MalformedRecordError
-from .authz import EFFECT_ALLOW, evaluate_document_access
+from .authz import (
+    DOCUMENT_MODE_CURRENT,
+    DOCUMENT_MODE_HISTORICAL_ARCHIVE,
+    DOCUMENT_MODES,
+    EFFECT_ALLOW,
+    evaluate_document_access,
+    validate_acl_policy,
+)
 
 
 def _fail(failures: list[dict], code: str, message: str) -> None:
@@ -288,7 +295,6 @@ def verify_snapshot(snapshot_dir: Path) -> dict:
         _fail(failures, "authorization",
               "authorization_context must state is_production_authorization: false")
     principal = ctx.get("principal")
-    principal = ctx.get("principal")
     pinfo = None
     identities = None
     if not principal:
@@ -319,6 +325,23 @@ def verify_snapshot(snapshot_dir: Path) -> dict:
         elif ctx.get("policy_version") != acl.get("policy_version"):
             _fail(failures, "authorization",
                   "authorization_context policy_version disagrees with the snapshotted policy")
+        else:
+            # Independent structural re-validation (2026-11-01 review,
+            # second pass): referential checks (unknown document/series)
+            # are deliberately skipped here - this snapshot only embeds its
+            # OWN document selection (source/corpus-manifest.selected.json),
+            # not the full corpus, so a grant legitimately targeting a
+            # document outside this selection would otherwise be flagged as
+            # "unknown" even though it is perfectly valid upstream. All
+            # other structural checks (unknown effect/subject type,
+            # duplicate grant_id, malformed/naive timestamps, bad target
+            # shape) do not need the full corpus and are fully re-checked.
+            policy_failures = validate_acl_policy(acl, known_documents=None)
+            if policy_failures:
+                _fail(failures, "authorization",
+                      f"snapshotted ACL policy fails structural validation (tampered?): "
+                      f"{policy_failures[:5]}")
+                acl = None  # unusable: every recomputed decision below must be default_deny
 
     # Independent re-evaluation of every included document's authorization
     # decision (2026-11-01 review finding): the builder refuses to include a
@@ -330,6 +353,14 @@ def verify_snapshot(snapshot_dir: Path) -> dict:
     # been included). policy_time is read from the manifest's
     # authorization_context, never from wall-clock "now".
     policy_time = ctx.get("policy_time")
+    document_mode = ctx.get("document_mode")
+    archive_mode_authorized = ctx.get("archive_mode_authorized")
+    if document_mode not in DOCUMENT_MODES:
+        _fail(failures, "authorization", f"unknown document_mode {document_mode!r}")
+    if document_mode == DOCUMENT_MODE_HISTORICAL_ARCHIVE and archive_mode_authorized is not True:
+        _fail(failures, "authorization",
+              "document_mode is 'historical_archive' but archive_mode_authorized "
+              "is not recorded as true")
     if principal and isinstance(policy_time, str):
         for doc in manifest_docs:
             if not isinstance(doc, dict):
@@ -355,6 +386,15 @@ def verify_snapshot(snapshot_dir: Path) -> dict:
                 _fail(failures, "authorization",
                       f"document {sid}: included in snapshot despite a non-allow "
                       f"authorization decision ({stored.get('resolution')})")
+            # Lifecycle eligibility independently recomputed (SPEC.md §5.7):
+            # under "current" mode every included document must ALSO be
+            # eligible; an ACL allow never substitutes for this.
+            if document_mode == DOCUMENT_MODE_CURRENT:
+                recomputed_elig = eligibility_for(doc.get("lifecycle_source"))
+                if recomputed_elig["status"] != "eligible_offline_simulated":
+                    _fail(failures, "authorization",
+                          f"document {sid}: included under document_mode='current' "
+                          f"despite lifecycle status {recomputed_elig['status']!r}")
 
     # The manifest's embedded document records must equal the hash-verified
     # documents.json artifact - the manifest itself is otherwise unauthenticated.

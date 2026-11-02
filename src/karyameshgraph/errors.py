@@ -79,9 +79,25 @@ class FixtureMixingError(KMGError):
 
 class AuthorizationError(KMGError):
     """Authorization context invalid: unknown/disabled principal, missing
-    identity registry, or unsupported mode. Missing policy never means public."""
+    identity registry, or unsupported mode. Missing policy never means public.
+    Also raised when an ACL policy fails structural validation (unknown
+    effect/subject type, duplicate grant id, malformed timestamp, ...) -
+    the whole policy is then unusable, not just the bad grant - and when
+    ``document_mode="historical_archive"`` is requested without the explicit
+    ``archive_mode_authorized=True`` flag."""
 
     code = "authorization"
+
+
+class LifecycleIneligibleError(KMGError):
+    """A requested document is not a currently eligible SOP (not approved,
+    or withdrawn) under ``document_mode="current"``. An ACL allow is a
+    SEPARATE axis (SPEC.md §5.7) and never substitutes for lifecycle
+    eligibility; importing an ineligible document requires the caller to
+    deliberately opt into ``document_mode="historical_archive"`` with
+    ``archive_mode_authorized=True``."""
+
+    code = "lifecycle_ineligible"
 
 
 class SnapshotStateError(KMGError):
