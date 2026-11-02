@@ -222,7 +222,9 @@ def main(argv: list[str] | None = None) -> int:
                                "pass the actual count for fixture/pilot work)")
     p_gbuild.add_argument("--alias-out",
                           help="also write the committable alias table here "
-                               "(identifiers and titles only; owner-approved)")
+                               "(identifiers and titles only; owner-approved). "
+                               "Refreshes a previous alias table in place; "
+                               "refuses to overwrite any other file")
     p_gbuild.set_defaults(func=cmd_graph_build)
     p_gverify = graph_sub.add_parser(
         "verify", help="independently verify a graph against its snapshot")

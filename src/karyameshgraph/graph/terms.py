@@ -51,11 +51,22 @@ _P_ATTACH_QUOTE = re.compile(r"^\([A-Z]\)\s")      # statute quote lines
 _P_ATTACH_SUB = re.compile(r"^[‒—-]\s")  # example sub-bullets
 _P_CONTINUATION = re.compile(r"^[a-z(\[]")
 _P_BULLET = re.compile(r"^[•]\s?")
+# A colon/bullet "term" that is really a list lead-in inside the previous
+# definition ('Examples of potential risks include:' — flagged by the
+# discovery sweep as a V3 false positive in CRS-SOP-044/045).
+_LEADIN_TERM = re.compile(
+    r"\b(?:include|includes|including|following|as follows)$", re.I)
 
 _QUALIFIER = re.compile(r"\s*\(as defined for this MAPP\)\s*", re.I)
-_TRAIL_DIGITS = re.compile(r"\d{1,2}$")
+# Footnote superscripts glued to a word ('Record18'). Digits after a space
+# or an uppercase letter are part of the term: an unconditional strip
+# mangled 'ISO 17034' into 'iso 170' and merged 'Level 1'..'Level 4' into
+# one term (2026-11-01 review).
+_TRAIL_DIGITS = re.compile(r"(?<=[a-z)])\d{1,2}$")
 _TRAIL_PAREN = re.compile(r"\s*\(([^()]{1,40})\)\s*$")
-_GLUED_FOOT_REFS = re.compile(r"(?<=[.?!])\s*\d{1,2}(?:,\d{1,2})*$")
+# Footnote refs glued after sentence punctuation, incl. a closing bracket
+# or quote that _TERMINAL already accepts ('...5.)14').
+_GLUED_FOOT_REFS = re.compile(r"(?<=[.?!)”\"])\s*\d{1,2}(?:,\d{1,2})*$")
 _TERMINAL = re.compile(r"[.?!:)”\"]\s*$")
 
 
@@ -110,6 +121,8 @@ def build_terms(docs_ctx: dict[str, dict]) -> dict:
         "paragraphs_dropped_other": 0,
         "paragraphs_unparsed": 0,
         "group_headers": 0,
+        "leadins_rejected": 0,
+        "chunk_boundary_continuations": 0,
     }
 
     for sid in sorted(docs_ctx):
@@ -151,6 +164,17 @@ def build_terms(docs_ctx: dict[str, dict]) -> dict:
                 if m and m.group("defn").strip():
                     matched = (vname, m)
                     break
+            if (matched is not None
+                    and matched[0] in ("V3_unmarked_colon", "V4_bulleted")
+                    and _LEADIN_TERM.search(matched[1].group("term").strip())):
+                # List lead-in, not an entry: part of the open definition.
+                if open_entry is not None:
+                    open_entry["end"] = pe
+                    stats["paragraphs_attached"] += 1
+                else:
+                    stats["paragraphs_unparsed"] += 1
+                stats["leadins_rejected"] += 1
+                continue
             if matched is None and _P_BULLET.match(body):
                 # Bullet without a separator: example list under the open
                 # entry, never a term.
@@ -164,6 +188,18 @@ def build_terms(docs_ctx: dict[str, dict]) -> dict:
                 m = _COPULA.match(body)
                 if m:
                     matched = ("copula", m)
+            if (matched is None and open_entry is not None
+                    and js.starts_new_element(ps)
+                    and not _TERMINAL.search(_GLUED_FOOT_REFS.sub(
+                        "", js.text[open_entry["start"]:open_entry["end"]].rstrip()))):
+                # Upstream sometimes splits one sentence into two paragraph
+                # elements across a chunk boundary with no cut marker: the
+                # unterminated entry continues into the next chunk's first
+                # paragraph (which matches no entry format).
+                open_entry["end"] = pe
+                stats["paragraphs_attached"] += 1
+                stats["chunk_boundary_continuations"] += 1
+                continue
             if matched is None:
                 # Term-only group header ('MAPP' heading sub-bullets)?
                 nxt = js.text[paras[pi + 1][0]:paras[pi + 1][1]] if pi + 1 < len(paras) else ""

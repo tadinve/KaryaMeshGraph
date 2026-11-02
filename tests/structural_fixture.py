@@ -1,12 +1,17 @@
 """Structural-graph fixture: four synthetic docs exercising every M1.5 rule.
 
 - SYN-A-001 (family A): roles with a duty carried across a chunk boundary,
-  two definitions, a clean Document History table, one noisy section.
+  two definitions in two SEPARATE chunks (regression: a single-newline
+  chunk join fused them into one entry and lost 'Record'), a clean
+  Document History table, one noisy section.
 - SYN-A-002 (family A): self-citation + unresolvable citation, a duplicate
   'Record' definition (multi-doc term), a SCRAMBLED history table.
 - SYN-B-001 (family B): 'will:'-role + colon-role + carried bullet duty +
-  footnote contamination, a truncated definition (AMBIGUOUS), clean
-  CHANGE CONTROL TABLE with a cross-line description.
+  footnote contamination; a bare role header that ENDS a chunk with its
+  duties in the next chunk (regression: per-chunk lookahead missed the
+  header and gave its duties to the previous role); a list lead-in
+  ('... include:') that must not become a term; a truncated definition
+  (AMBIGUOUS); clean CHANGE CONTROL TABLE with a cross-line description.
 - SYN-B-002 (family B): front-matter chunk, merged RESPONSIBILITIES AND
   PROCEDURES (no role edges, AMBIGUOUS exclusion), clean one-row table.
 
@@ -45,8 +50,9 @@ DOC_SPECS = [
                      f"1. {M} Owns the synthetic manual end to end."},
             {"titles": ["7. Glossary/Definitions"],
              "text": f"A. Calibration – {M} synthetic comparison against "
-                     "a reference standard.\n\n"
-                     f"B. Record – {M} synthetic recorded evidence of an "
+                     "a reference standard."},
+            {"titles": ["7. Glossary/Definitions"],
+             "text": f"B. Record – {M} synthetic recorded evidence of an "
                      "activity."},
             {"titles": ["10. Document History"],
              "text": "Revision # | Status | Date | Author | Approver\n"
@@ -89,10 +95,16 @@ DOC_SPECS = [
             {"titles": ["RESPONSIBILITIES"],
              "text": f"• {M} Coordinate synthetic reviews quarterly.\n"
                      "Division Director:\n"
-                     f"• {M} Sign synthetic memoranda when issued."},
+                     f"• {M} Sign synthetic memoranda when issued.\n"
+                     "Records Liaison Officer"},
+            {"titles": ["RESPONSIBILITIES"],
+             "text": f"• {M} Track synthetic records holds.\n"
+                     f"• {M} Report synthetic holds monthly."},
             {"titles": ["DEFINITIONS"],
              "text": f"Synthetic Term: {M} a term used only for testing "
                      "graph extraction.\n\n"
+                     f"Examples of synthetic risks include: {M} alpha, beta "
+                     "and gamma.\n\n"
                      f"Calibration (CAL): {M} second-family definition that "
                      "is visibly truncated"},
             {"titles": ["CHANGE CONTROL TABLE"],

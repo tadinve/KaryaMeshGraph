@@ -7,9 +7,16 @@ family-A ones). Depth-0 chunks (empty section_path_titles — five in the
 real corpus, always index 1) land in an explicit FRONT_MATTER bucket.
 Documents whose family cannot be determined from source_series get NO
 skeleton (fail closed) and are reported.
+
+Noisy titles are frequently not headings at all but wrapped sentence
+fragments or table cells promoted by the extractor, so their exclusion
+records carry a title hash and chunk locations — never the text itself;
+the excluded title is recoverable from the snapshot by chunk_uid.
 """
 
 from __future__ import annotations
+
+import hashlib
 
 from .common import CANONS, FRONT_MATTER, slug, top_title
 from .models import DERIVATION_EXPLICIT, edge, evidence_span, node
@@ -42,11 +49,13 @@ def build_sections(docs_ctx: dict[str, dict]) -> dict:
                 "raw_titles": set(),
                 "first_rec": rec,
                 "chunk_indices": [],
+                "chunk_uids": [],
             })
             raw = (rec.get("section_path_titles") or [None])[0]
             if raw is not None:
                 entry["raw_titles"].add(raw)
             entry["chunk_indices"].append(rec["index"])
+            entry["chunk_uids"].append(rec["chunk_uid"])
 
         order = 0
         emitted = False
@@ -56,9 +65,10 @@ def build_sections(docs_ctx: dict[str, dict]) -> dict:
                 noisy.append({
                     "stable_id": sid,
                     "family": family,
-                    "normalized_title": key,
-                    "raw_titles": sorted(entry["raw_titles"]),
+                    "title_sha256": hashlib.sha256(key.encode("utf-8")).hexdigest(),
+                    "raw_title_variants": len(entry["raw_titles"]),
                     "chunk_indices": entry["chunk_indices"],
+                    "chunk_uids": entry["chunk_uids"],
                 })
                 continue
             first = entry["first_rec"]

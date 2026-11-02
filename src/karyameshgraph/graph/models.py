@@ -19,8 +19,14 @@ import hashlib
 from ..contracts.models import canonical_json
 from ..errors import MalformedRecordError
 
-GRAPH_SCHEMA_VERSION = "1.0.0"
-BUILDER_VERSION = "m1.5-structural-1"
+# 2.0.0: graph_id is the hash of the whole manifest core (binding every
+# artifact, incl. alias-table.json and exclusions.json); snapshot_path
+# removed from the manifest. structural-2: element-boundary chunk join,
+# cross-chunk role lookahead and definition continuation, tightened role
+# names, list lead-ins rejected as terms, faithful term normalization,
+# text-free noisy-title exclusions (2026-11-01 review fixes).
+GRAPH_SCHEMA_VERSION = "2.0.0"
+BUILDER_VERSION = "m1.5-structural-2"
 
 DERIVATION_EXPLICIT = "EXPLICIT"
 DERIVATION_INFERRED = "INFERRED"
@@ -102,15 +108,12 @@ def edge(kind: str, src: str, dst: str, *, derivation: str,
     return rec
 
 
-def graph_identity(*, snapshot_id: str, nodes: list[dict], edges: list[dict]) -> str:
-    """Content-derived graph id: stable across repeat builds from the same
-    snapshot, sensitive to any node/edge change. Timestamps are excluded by
-    construction (none are stored on nodes or edges)."""
-    core = canonical_json({
-        "schema_version": GRAPH_SCHEMA_VERSION,
-        "builder_version": BUILDER_VERSION,
-        "snapshot_id": snapshot_id,
-        "nodes": sorted(canonical_json(n) for n in nodes),
-        "edges": sorted(canonical_json(e) for e in edges),
-    })
+def graph_identity(manifest: dict) -> str:
+    """Content-derived graph id: the hash of the canonical manifest with
+    ``graph_id`` removed. The manifest pins the SHA-256 of every artifact
+    (nodes, edges, alias table, exclusions) plus the snapshot id, versions
+    and summary stats, so ANY change to any graph file or manifest field
+    yields a different id. Stable across repeat builds from the same
+    snapshot: no timestamps or machine paths are stored anywhere."""
+    core = canonical_json({k: v for k, v in manifest.items() if k != "graph_id"})
     return "kgraph-" + hashlib.sha256(core.encode("utf-8")).hexdigest()

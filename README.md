@@ -22,15 +22,17 @@ KaryaMeshRAG (read-only; frozen v2 corpus)          KaryaMeshGraph (this repo)
 
 ## Status
 
-M0 (bootstrap), M1 (read-only artifact integration), and M1.5
-(deterministic structural graph, no LLM) are implemented, reviewed, and
-**PASS** — see `evidence/m1-report.md` and `evidence/m1_5-report.md` for
-the full evidence (a 2026-11-02 review found and fixed a PDF-path
-verification bug and a document-level ACL enforcement gap in M1; both are
-corrected and re-verified against the real upstream corpus). Later
-milestones (LLM rule extraction, typed graph, contradiction candidates,
-review workflow) are specified in SPEC.md and gated on review of the
-structural graph's usefulness and quality.
+M0 (bootstrap) and M1 (read-only artifact integration) are implemented,
+reviewed, and **PASS** — see `evidence/m1-report.md` (a 2026-11-01 review
+found and fixed a PDF-path verification bug and a document-level ACL
+enforcement gap; both re-verified against the real upstream corpus).
+M1.5 (deterministic structural graph, no LLM) is implemented, reviewed,
+and **PASS** after a 2026-11-01 adversarial review that found and fixed a
+parser bug dropping 25% of definitions and several verifier gaps — see
+`evidence/m1_5-report.md` (§9 lists every finding and fix). Later milestones (LLM rule
+extraction, typed graph, contradiction candidates, review workflow) are
+specified in SPEC.md and gated on review of the structural graph's
+usefulness and quality.
 
 ## Setup
 
@@ -64,10 +66,13 @@ KMG_REAL_SOURCE_ROOT=../KaryaMeshScratch uv run pytest -q
 ## M1.5 commands (deterministic structural graph, no LLM)
 
 ```bash
-# Entry gate: full-corpus snapshot (all 50 documents) + independent verify
+# Entry gate: full-corpus snapshot (all 50 documents) + independent verify.
+# historical_archive is required because CRS-SOP-050 is WITHDRAWN upstream;
+# the structural graph deliberately covers every document.
 uv run karyameshgraph snapshot build --source-root ../KaryaMeshScratch \
   --documents all --out data/snapshots/full-v2 \
-  --principal compliance.officer --authorization-mode offline_simulation
+  --principal compliance.officer --authorization-mode offline_simulation \
+  --document-mode historical_archive --archive-mode-authorized
 uv run karyameshgraph snapshot verify --snapshot data/snapshots/full-v2
 
 # Build the structural graph (sections, roles, terms, revisions, citations;
@@ -75,8 +80,9 @@ uv run karyameshgraph snapshot verify --snapshot data/snapshots/full-v2
 uv run karyameshgraph graph build --snapshot data/snapshots/full-v2 \
   --out data/graphs/structural-v2 --alias-out evidence/alias-table.json
 
-# Independently verify the graph (recomputes hashes, edge ids, graph_id,
-# and re-resolves every evidence span against the snapshot)
+# Independently verify the graph: recomputes hashes, edge ids and graph_id,
+# re-resolves every evidence span, and checks the graph reproduces byte for
+# byte from the snapshot
 uv run karyameshgraph graph verify --graph data/graphs/structural-v2 \
   --snapshot data/snapshots/full-v2
 ```

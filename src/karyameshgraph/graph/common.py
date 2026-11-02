@@ -114,20 +114,68 @@ def lines_with_offsets(text: str) -> list[tuple[str, int]]:
     return out
 
 
-class JoinedSection:
-    """Chunks of one titled section joined by '\\n' for cross-chunk parsing,
-    with exact mapping from joined offsets back to per-chunk evidence spans
-    (overlap_chars=0 upstream makes the join lossless)."""
+ELEMENT_SEPARATOR = "\n\n"   # upstream's own inter-element separator
+# The two parts of a cut element are contiguous (element_end of the first
+# == element_start of the second on all 26 real cuts) and the cut
+# whitespace stays on the first part, so they join with nothing between.
+CONTINUATION_SEPARATOR = ""
 
-    def __init__(self, pieces: list[tuple[str, str, list | None]]):
-        # pieces: (chunk_uid, text, pages)
-        self.text = "\n".join(t for _, t, _ in pieces)
+
+def continues_into_next(rec: dict) -> bool:
+    """True when a chunk's last element is cut and continues in the next
+    chunk. Upstream marks the cut with ``split_within_element`` set to the
+    cut kind ('sentence'/'whitespace') on the earlier part and 'end' on the
+    final part; element geometry (element_end < element_length) agrees on
+    all 26 real cases, and either signal suffices."""
+    swe = rec.get("split_within_element")
+    if isinstance(swe, str) and swe and swe != "end":
+        return True
+    els = rec.get("elements")
+    if isinstance(els, list) and els and isinstance(els[-1], dict):
+        end, length = els[-1].get("element_end"), els[-1].get("element_length")
+        if isinstance(end, int) and isinstance(length, int) and end < length:
+            return True
+    return False
+
+
+class JoinedSection:
+    """Chunks of one titled section joined for cross-chunk parsing, with
+    exact mapping from joined offsets back to per-chunk evidence spans
+    (overlap_chars=0 upstream makes the join lossless).
+
+    Chunk boundaries are element boundaries, so chunks are joined with
+    upstream's element separator (a blank line); a chunk that continues a
+    cut element is joined directly, reconstructing the element. Joining
+    every boundary with one newline (the pre-2026-11-01-review behavior)
+    fused the first definition of each chunk into the previous one and
+    silently lost 85 of 339 real definitions."""
+
+    def __init__(self, pieces: list[tuple[str, str, list | None, bool]]):
+        # pieces: (chunk_uid, text, pages, continues_previous_piece)
+        parts: list[str] = []
         self._bounds: list[tuple[int, int, str, int, int | None]] = []
         pos = 0
-        for uid, t, pages in pieces:
+        for i, (uid, t, pages, cont) in enumerate(pieces):
+            if i:
+                sep = CONTINUATION_SEPARATOR if cont else ELEMENT_SEPARATOR
+                parts.append(sep)
+                pos += len(sep)
             first_page = pages[0] if isinstance(pages, list) and pages else None
             self._bounds.append((pos, pos + len(t), uid, len(t), first_page))
-            pos += len(t) + 1
+            parts.append(t)
+            pos += len(t)
+        self.text = "".join(parts)
+
+    def starts_new_element(self, offset: int) -> bool:
+        """True when ``offset`` is the first non-whitespace position of a
+        piece that was joined at an element boundary (not a continuation
+        of a cut element)."""
+        for i, (s, e, *_rest) in enumerate(self._bounds):
+            if s <= offset < e or (offset == e and s == e):
+                if i and self.text[self._bounds[i - 1][1]:s] == "":
+                    return False  # continuation join: same element
+                return self.text[s:offset].strip() == ""
+        return False
 
     def spans(self, start: int, end: int) -> list[dict]:
         """Map a joined-text range to one or more chunk evidence spans."""
@@ -146,8 +194,15 @@ class JoinedSection:
 def joined_section(chunks: list[dict], member) -> JoinedSection | None:
     """Join a document's chunks whose record satisfies ``member(rec)``,
     preserving upstream index order (verified contiguous 1..N per doc)."""
-    pieces = [
-        (rec["chunk_uid"], rec["text"], rec.get("pages"))
-        for rec in chunks if member(rec)
-    ]
+    pieces = []
+    prev = None
+    for rec in chunks:
+        if not member(rec):
+            continue
+        # A cut element continues only into the ADJACENT chunk; a member
+        # filter that skipped chunks in between breaks the continuation.
+        cont = (prev is not None and rec["index"] == prev["index"] + 1
+                and continues_into_next(prev))
+        pieces.append((rec["chunk_uid"], rec["text"], rec.get("pages"), cont))
+        prev = rec
     return JoinedSection(pieces) if pieces else None

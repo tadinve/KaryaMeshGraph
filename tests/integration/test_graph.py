@@ -1,26 +1,32 @@
 """M1.5 structural-graph tests over the four-document structural fixture.
 
 Positive path: source → snapshot → graph → independent verify, with every
-deliverable's rules exercised (carried roles, merged-doc exclusion,
+deliverable's rules exercised (carried roles, a header that ends a chunk,
+merged-doc exclusion, definitions split across chunks, list lead-ins,
 truncated definition, scrambled table, self-citation, noisy section).
-Negative path: tampering at every layer is caught; no source passage ever
-reaches a graph file.
+Negative path: tampering at every layer is caught — including a fully
+rehashed tamper, which only the reproduction check can see; no source
+passage ever reaches a graph file.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 
 from structural_fixture import DOC_SPECS, build_structural_source
-from synthetic import SYNTH_MARKER, tree_digest
+from synthetic import SYNTH_MARKER, rewrite_chunks, tree_digest
 
 from karyameshgraph.cli import main as cli_main
-from karyameshgraph.errors import SnapshotStateError
-from karyameshgraph.graph.build import build_graph
+from karyameshgraph.contracts.models import canonical_json
+from karyameshgraph.errors import MalformedRecordError, SnapshotStateError
+from karyameshgraph.graph.build import build_graph, manifest_bytes
+from karyameshgraph.graph.models import graph_identity
 from karyameshgraph.graph.verify import verify_graph
 from karyameshgraph.ingest.snapshot import build_snapshot
 from karyameshgraph.ingest.source import SourceLayout
@@ -33,16 +39,20 @@ def _load_jsonl(path: Path) -> list[dict]:
             if l.strip()]
 
 
+def _build_snapshot(source: Path, out: Path) -> None:
+    build_snapshot(SourceLayout(source), DOCS, out,
+                   principal="svc.import",
+                   authorization_mode="offline_simulation",
+                   created_at="2026-11-01T00:00:00+00:00")
+
+
 @pytest.fixture(scope="module")
 def built(tmp_path_factory):
     base = tmp_path_factory.mktemp("m15")
     source = build_structural_source(base / "source")
     digest_before = tree_digest(source)
     snap = base / "snap"
-    build_snapshot(SourceLayout(source), DOCS, snap,
-                   principal="svc.import",
-                   authorization_mode="offline_simulation",
-                   created_at="2026-11-01T00:00:00+00:00")
+    _build_snapshot(source, snap)
     graph = base / "graph"
     manifest = build_graph(snap, graph, expected_documents=4,
                            alias_out=base / "alias.json")
@@ -65,6 +75,39 @@ def _edges(built, kind):
     return [e for e in built["edges"] if e["kind"] == kind]
 
 
+def _snapshot_text(built, chunk_uid: str) -> str:
+    sid = chunk_uid.split("@", 1)[0]
+    for rec in _load_jsonl(built["snap"] / "chunks" / f"{sid}.jsonl"):
+        if rec["chunk_uid"] == chunk_uid:
+            return rec["text"]
+    raise AssertionError(f"chunk not found: {chunk_uid}")
+
+
+def _rehash_graph(gdir: Path) -> None:
+    """Make a tampered graph internally consistent again: refresh every
+    artifact hash in the manifest and recompute graph_id — the strongest
+    tamper, which only reproduction from the snapshot can detect."""
+    mpath = gdir / "graph-manifest.json"
+    manifest = json.loads(mpath.read_text(encoding="utf-8"))
+    for name in manifest["artifacts"]:
+        data = (gdir / name).read_bytes()
+        manifest["artifacts"][name] = {
+            "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+    manifest["graph_id"] = graph_identity(manifest)
+    mpath.write_bytes(manifest_bytes(manifest))
+
+
+def _write_edges(gdir: Path, edges: list[dict]) -> None:
+    (gdir / "edges.jsonl").write_text(
+        "".join(canonical_json(e) + "\n" for e in edges), encoding="utf-8")
+
+
+def _reid(e: dict) -> dict:
+    core = canonical_json({k: v for k, v in e.items() if k != "edge_id"})
+    e["edge_id"] = "e-" + hashlib.sha256(core.encode("utf-8")).hexdigest()[:24]
+    return e
+
+
 # --- deliverable 1: section skeleton ---------------------------------------
 
 def test_section_skeleton(built):
@@ -79,11 +122,17 @@ def test_section_skeleton(built):
     fm = [s for s in by_doc["SYN-B-002"] if s["front_matter"]]
     assert len(fm) == 1 and fm[0]["title"] == "FRONT_MATTER"
     assert not fm[0]["canonical"]
-    noisy = built["exclusions"]["noisy_titles"]
-    assert any(n["stable_id"] == "SYN-A-001"
-               and n["normalized_title"] == "NONSENSE ATTACHMENT TABLE"
-               for n in noisy)
     assert all(e["derivation"] == "EXPLICIT" for e in _edges(built, "HAS_SECTION"))
+
+
+def test_noisy_title_excluded_without_text(built):
+    noisy = built["exclusions"]["noisy_titles"]
+    want = hashlib.sha256(b"NONSENSE ATTACHMENT TABLE").hexdigest()
+    hits = [n for n in noisy if n["stable_id"] == "SYN-A-001"]
+    assert len(hits) == 1 and hits[0]["title_sha256"] == want
+    assert hits[0]["chunk_uids"] and all("#" in u for u in hits[0]["chunk_uids"])
+    # The excluded title is located, never copied.
+    assert "NONSENSE" not in (built["graph"] / "exclusions.json").read_text().upper()
 
 
 # --- deliverable 2: roles ---------------------------------------------------
@@ -92,17 +141,38 @@ def test_role_nodes_and_edges(built):
     roles = {r["id"]: r for r in _nodes(built, "Role")}
     names = sorted(r["name"] for r in roles.values())
     assert names == ["Division Director", "Laboratory Director",
-                     "Quality Manager", "The Synthetic Office of Testing (SOT)"]
+                     "Quality Manager", "Records Liaison Officer",
+                     "The Synthetic Office of Testing (SOT)"]
     rf = _edges(built, "RESPONSIBLE_FOR")
-    assert len(rf) == 8
+    assert len(rf) == 10
     inferred = [e for e in rf if e["derivation"] == "INFERRED"]
     explicit = [e for e in rf if e["derivation"] == "EXPLICIT"]
-    assert len(inferred) == 2 and len(explicit) == 6
-    # The carried duties belong to the roles whose headers sit in the
-    # previous chunk: Quality Manager (A) and SOT (B).
-    carried_roles = {roles[e["src"]]["name"] for e in inferred}
-    assert carried_roles == {"Quality Manager",
-                             "The Synthetic Office of Testing (SOT)"}
+    assert len(inferred) == 4 and len(explicit) == 6
+    # Carried duties belong to the roles whose headers sit in an earlier
+    # chunk: Quality Manager (A), SOT (B), and the chunk-ending header.
+    carried_roles = sorted(roles[e["src"]]["name"] for e in inferred)
+    assert carried_roles == ["Quality Manager", "Records Liaison Officer",
+                             "Records Liaison Officer",
+                             "The Synthetic Office of Testing (SOT)"]
+    assert built["manifest"]["deliverable_stats"]["roles"]["carried_roles"] == 3
+
+
+def test_header_ending_a_chunk_keeps_its_duties(built):
+    """Regression: a bare header on the last line of a chunk used to be
+    read as prose (no lookahead into the next chunk), so its duties were
+    attached to the previous role (Division Director)."""
+    roles = {r["name"]: r["id"] for r in _nodes(built, "Role")}
+    rf = _edges(built, "RESPONSIBLE_FOR")
+    rlo = [e for e in rf if e["src"] == roles["Records Liaison Officer"]]
+    dd = [e for e in rf if e["src"] == roles["Division Director"]]
+    assert len(rlo) == 2 and all(e["derivation"] == "INFERRED" for e in rlo)
+    assert len(dd) == 1
+    texts = [_snapshot_text(built, s["chunk_uid"])[s["start"]:s["end"]]
+             for e in rlo for s in e["evidence"]]
+    assert any("Track synthetic records holds" in t for t in texts)
+    dd_text = " ".join(_snapshot_text(built, s["chunk_uid"])[s["start"]:s["end"]]
+                       for e in dd for s in e["evidence"])
+    assert "Records Liaison Officer" not in dd_text
 
 
 def test_merged_doc_yields_no_role_edges(built):
@@ -126,13 +196,24 @@ def test_terms_multi_doc_linked_never_merged(built):
     terms = {t["name"]: t for t in _nodes(built, "Term")}
     assert terms["calibration"]["doc_count"] == 2
     assert terms["calibration"]["aliases"] == ["CAL"]
+    # Regression: SYN-A-001's 'Record' sits in its own chunk; a single-
+    # newline join fused it into 'Calibration' and dropped it.
     assert terms["record"]["doc_count"] == 2
+    assert sorted(terms["record"]["documents"]) == ["SYN-A-001", "SYN-A-002"]
     defined = _edges(built, "DEFINED_IN")
     assert len(defined) == 5
     cal_edges = [e for e in defined if e["src"] == terms["calibration"]["id"]]
     assert sorted(e["dst"] for e in cal_edges) == ["SYN-A-001", "SYN-B-001"]
     # Definitions stay distinct per edge: different evidence spans.
     assert cal_edges[0]["evidence"] != cal_edges[1]["evidence"]
+
+
+def test_list_leadin_is_not_a_term(built):
+    names = {t["name"] for t in _nodes(built, "Term")}
+    assert not [n for n in names if "include" in n]
+    assert names >= {"synthetic term", "calibration", "record"}
+    stats = built["manifest"]["deliverable_stats"]["terms"]
+    assert stats["leadins_rejected"] == 1
 
 
 def test_truncated_definition_is_ambiguous(built):
@@ -207,20 +288,18 @@ def test_alias_table(built):
 
 # --- cross-cutting guarantees --------------------------------------------------
 
-def _snapshot_text(built, chunk_uid: str) -> str:
-    sid = chunk_uid.split("@", 1)[0]
-    for rec in _load_jsonl(built["snap"] / "chunks" / f"{sid}.jsonl"):
-        if rec["chunk_uid"] == chunk_uid:
-            return rec["text"]
-    raise AssertionError(f"chunk not found: {chunk_uid}")
-
-
 def test_no_source_passages_in_graph_files(built):
     for name in ("nodes.jsonl", "edges.jsonl", "exclusions.json",
                  "graph-manifest.json"):
         assert SYNTH_MARKER not in (built["graph"] / name).read_text(
             encoding="utf-8"), f"source text leaked into {name}"
     assert SYNTH_MARKER not in (built["base"] / "alias.json").read_text()
+
+
+def test_manifest_has_no_machine_paths(built):
+    raw = (built["graph"] / "graph-manifest.json").read_text(encoding="utf-8")
+    assert "snapshot_path" not in raw
+    assert str(built["base"]) not in raw
 
 
 def test_evidence_spans_resolve_to_expected_text(built):
@@ -246,42 +325,145 @@ def test_repeat_build_identical(built):
     graph2 = built["base"] / "graph2"
     manifest2 = build_graph(built["snap"], graph2, expected_documents=4)
     assert manifest2["graph_id"] == built["manifest"]["graph_id"]
-    for name in ("nodes.jsonl", "edges.jsonl", "graph-manifest.json"):
+    for name in ("nodes.jsonl", "edges.jsonl", "alias-table.json",
+                 "exclusions.json", "graph-manifest.json"):
         assert (graph2 / name).read_bytes() == (built["graph"] / name).read_bytes()
+
+
+def test_repeat_build_identical_across_path_spellings(built):
+    """No machine path is stored, so a differently spelled path to the
+    same snapshot yields byte-identical output."""
+    link = built["base"] / "snap-link"
+    os.symlink(built["snap"], link)
+    graph3 = built["base"] / "graph3"
+    manifest3 = build_graph(link, graph3, expected_documents=4)
+    assert manifest3["graph_id"] == built["manifest"]["graph_id"]
+    assert ((graph3 / "graph-manifest.json").read_bytes()
+            == (built["graph"] / "graph-manifest.json").read_bytes())
 
 
 def test_graph_verify_ok_and_cli(built, capsys):
     report = verify_graph(built["graph"], built["snap"])
     assert report["ok"], report["failures"]
+    assert report["reproduced"] is True
     assert report["evidence_spans_verified"] > 0
     rc = cli_main(["graph", "verify", "--graph", str(built["graph"]),
                    "--snapshot", str(built["snap"])])
     out = capsys.readouterr().out
     assert rc == 0 and "verdict: OK" in out
+    assert "reproduced from snapshot: True" in out
     assert SYNTH_MARKER not in out
 
 
-# --- negative path ---------------------------------------------------------------
+# --- negative path: verification -------------------------------------------------
+
+def _copy_graph(built, tmp_path, name):
+    dst = tmp_path / name
+    shutil.copytree(built["graph"], dst)
+    return dst
+
 
 def test_verify_catches_tampered_edges(built, tmp_path):
-    bad = tmp_path / "graph-bad"
-    shutil.copytree(built["graph"], bad)
+    bad = _copy_graph(built, tmp_path, "graph-bad")
     edges = _load_jsonl(bad / "edges.jsonl")
     edges[0]["derivation"] = ("INFERRED" if edges[0]["derivation"] == "EXPLICIT"
                               else "EXPLICIT")
-    (bad / "edges.jsonl").write_text(
-        "".join(json.dumps(e, sort_keys=True, separators=(",", ":")) + "\n"
-                for e in edges), encoding="utf-8")
+    _write_edges(bad, edges)
+    report = verify_graph(bad, built["snap"])
+    assert not report["ok"] and not report["reproduced"]
+    assert any("edges.jsonl: sha256 mismatch" in f for f in report["failures"])
+    assert any("edge_id does not match" in f for f in report["failures"])
+    assert any("derivations histogram" in f for f in report["failures"])
+    assert any("does not reproduce" in f for f in report["failures"])
+
+
+def test_alias_swap_changes_graph_id_and_fails_verify(built, tmp_path):
+    """The committed alias table is bound into graph_id: swapping it with a
+    refreshed artifact hash but the old graph_id fails identity; fully
+    rehashing it yields a NEW graph_id and still fails reproduction."""
+    bad = _copy_graph(built, tmp_path, "graph-alias")
+    alias = json.loads((bad / "alias-table.json").read_text())
+    alias["rows"][0]["stable_id"] = alias["rows"][1]["stable_id"]
+    (bad / "alias-table.json").write_text(canonical_json(alias) + "\n")
+    manifest = json.loads((bad / "graph-manifest.json").read_text())
+    data = (bad / "alias-table.json").read_bytes()
+    manifest["artifacts"]["alias-table.json"] = {
+        "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+    (bad / "graph-manifest.json").write_bytes(manifest_bytes(manifest))
     report = verify_graph(bad, built["snap"])
     assert not report["ok"]
-    assert any("sha256 mismatch" in f for f in report["failures"])
-    assert any("edge_id does not match" in f for f in report["failures"])
     assert any("graph_id does not match" in f for f in report["failures"])
+    assert any("alias-table.json" in f and "reproduce" in f
+               for f in report["failures"])
+
+    _rehash_graph(bad)
+    rehashed = json.loads((bad / "graph-manifest.json").read_text())
+    assert rehashed["graph_id"] != built["manifest"]["graph_id"]
+    report = verify_graph(bad, built["snap"])
+    assert not report["ok"]
+    assert any("does not reproduce" in f for f in report["failures"])
+
+
+def test_verify_rejects_promoted_verification_level(built, tmp_path):
+    """An edge silently promoted to SOURCE_VERIFIED is rejected even when
+    the tamper is fully rehashed (edge id, artifact hashes, graph_id)."""
+    bad = _copy_graph(built, tmp_path, "graph-level")
+    edges = _load_jsonl(bad / "edges.jsonl")
+    edges[0]["verification_level"] = "SOURCE_VERIFIED"
+    _reid(edges[0])
+    _write_edges(bad, edges)
+    _rehash_graph(bad)
+    report = verify_graph(bad, built["snap"])
+    assert not report["ok"]
+    assert any("only CHUNK_VERIFIED is claimable" in f for f in report["failures"])
+    assert not any("edge_id does not match" in f for f in report["failures"])
+    assert not any("graph_id does not match" in f for f in report["failures"])
+
+
+def test_verify_rejects_cross_document_span(built, tmp_path):
+    bad = _copy_graph(built, tmp_path, "graph-xdoc")
+    edges = _load_jsonl(bad / "edges.jsonl")
+    foreign = [e for e in edges if e["kind"] == "HAS_SECTION"
+               and e["src"] == "SYN-A-002"][0]["evidence"][0]
+    victim = [e for e in edges if e["kind"] == "HAS_SECTION"
+              and e["src"] == "SYN-A-001"][0]
+    victim["evidence"] = [dict(foreign)]
+    _reid(victim)
+    _write_edges(bad, edges)
+    _rehash_graph(bad)
+    report = verify_graph(bad, built["snap"])
+    assert not report["ok"]
+    assert any("another document's chunk" in f for f in report["failures"])
+
+
+def test_verify_reports_non_utf8_artifact(built, tmp_path):
+    bad = _copy_graph(built, tmp_path, "graph-utf8")
+    with (bad / "nodes.jsonl").open("ab") as fh:
+        fh.write(b"\xff\xfe{}\n")
+    report = verify_graph(bad, built["snap"])  # must report, not raise
+    assert not report["ok"]
+    assert any("not valid UTF-8" in f for f in report["failures"])
+
+
+def test_verify_reports_non_string_ids(built, tmp_path):
+    """Unhashable ids/endpoints must be reported, never crash the verifier."""
+    bad = _copy_graph(built, tmp_path, "graph-ids")
+    edges = _load_jsonl(bad / "edges.jsonl")
+    edges[0]["src"] = ["not", "a", "string"]
+    _write_edges(bad, edges)
+    nodes = _load_jsonl(bad / "nodes.jsonl")
+    doc = next(n for n in nodes if n["kind"] == "Document")
+    doc["id"] = {"not": "a string"}
+    (bad / "nodes.jsonl").write_text(
+        "".join(canonical_json(n) + "\n" for n in nodes), encoding="utf-8")
+    report = verify_graph(bad, built["snap"])  # must report, not raise
+    assert not report["ok"]
+    assert any("malformed edge record" in f for f in report["failures"])
+    assert any("malformed node record" in f for f in report["failures"])
 
 
 def test_verify_catches_undeclared_file(built, tmp_path):
-    bad = tmp_path / "graph-extra"
-    shutil.copytree(built["graph"], bad)
+    bad = _copy_graph(built, tmp_path, "graph-extra")
     (bad / "stray.txt").write_text("not declared")
     report = verify_graph(bad, built["snap"])
     assert not report["ok"]
@@ -301,6 +483,8 @@ def test_verify_catches_tampered_snapshot(built, tmp_path):
     assert not (tmp_path / "never-built").exists()
 
 
+# --- negative path: build ---------------------------------------------------------
+
 def test_build_refuses_existing_out(built):
     with pytest.raises(SnapshotStateError):
         build_graph(built["snap"], built["graph"], expected_documents=4)
@@ -312,3 +496,93 @@ def test_build_enforces_expected_documents(built, tmp_path):
                     expected_documents=50)
     assert "50" in str(exc.value) and SYNTH_MARKER not in str(exc.value)
     assert not (tmp_path / "wrong-count").exists()
+
+
+def test_alias_out_refuses_foreign_file_refreshes_alias(built, tmp_path):
+    foreign = tmp_path / "notes.txt"
+    foreign.write_text("hand-written notes")
+    with pytest.raises(SnapshotStateError):
+        build_graph(built["snap"], tmp_path / "g-foreign", expected_documents=4,
+                    alias_out=foreign)
+    assert foreign.read_text() == "hand-written notes"
+    assert not (tmp_path / "g-foreign").exists()
+
+    previous = tmp_path / "alias.json"
+    shutil.copy(built["base"] / "alias.json", previous)
+    build_graph(built["snap"], tmp_path / "g-alias", expected_documents=4,
+                alias_out=previous)
+    assert previous.read_bytes() == (built["base"] / "alias.json").read_bytes()
+
+
+def test_alias_out_refuses_paths_inside_graph_trees(built, tmp_path):
+    """A published graph's alias-table.json is hash-pinned by its manifest;
+    overwriting it (or writing into this build's own output) is refused
+    before anything is built."""
+    pinned = built["graph"] / "alias-table.json"
+    before = pinned.read_bytes()
+    with pytest.raises(SnapshotStateError) as exc:
+        build_graph(built["snap"], tmp_path / "g-pinned", expected_documents=4,
+                    alias_out=pinned)
+    assert "published graph tree" in str(exc.value)
+    assert pinned.read_bytes() == before
+    out = tmp_path / "g-self"
+    with pytest.raises(SnapshotStateError) as exc:
+        build_graph(built["snap"], out, expected_documents=4,
+                    alias_out=out / "alias.json")
+    assert "this build's own output" in str(exc.value)
+    assert not (tmp_path / "g-pinned").exists() and not out.exists()
+
+
+def test_stale_failure_report_removed_on_success(built, tmp_path):
+    out = tmp_path / "g-stale"
+    stale = tmp_path / "g-stale.failed.json"
+    stale.write_text('{"ok": false}')
+    build_graph(built["snap"], out, expected_documents=4)
+    assert out.is_dir() and not stale.exists()
+
+
+def test_orphaned_tmp_tree_refused(built, tmp_path):
+    orphan = tmp_path / ".g-orphan.tmp-99999"
+    orphan.mkdir()
+    with pytest.raises(SnapshotStateError) as exc:
+        build_graph(built["snap"], tmp_path / "g-orphan", expected_documents=4)
+    assert "orphaned" in str(exc.value)
+    orphan.rmdir()
+    build_graph(built["snap"], tmp_path / "g-orphan", expected_documents=4)
+
+
+def test_orphan_check_matches_names_literally(built, tmp_path):
+    """Glob metacharacters in the output name are literal: an unrelated
+    '.g1.tmp-*' does not block 'g[1]', while '.g[1].tmp-*' does."""
+    unrelated = tmp_path / ".g1.tmp-5"
+    unrelated.mkdir()
+    build_graph(built["snap"], tmp_path / "g[1]", expected_documents=4)
+    real_orphan = tmp_path / ".g[2].tmp-5"
+    real_orphan.mkdir()
+    with pytest.raises(SnapshotStateError):
+        build_graph(built["snap"], tmp_path / "g[2]", expected_documents=4)
+
+
+@pytest.mark.parametrize("drift_kind", ["string", "missing"])
+def test_malformed_section_titles_fail_typed(tmp_path, drift_kind):
+    """A title path delivered as one string, or a missing/renamed key (an
+    upstream schema drift the snapshot verifier does not inspect), must
+    fail typed, not silently produce an empty but 'verified' graph."""
+    source = build_structural_source(tmp_path / "source")
+
+    def drift(records):
+        for rec in records:
+            if rec["stable_id"] == "SYN-A-001" and rec["index"] == 2:
+                if drift_kind == "string":
+                    rec["section_path_titles"] = "3. Responsibility"
+                else:
+                    del rec["section_path_titles"]
+        return records
+
+    rewrite_chunks(source, drift)
+    snap = tmp_path / "snap"
+    _build_snapshot(source, snap)
+    with pytest.raises(MalformedRecordError) as exc:
+        build_graph(snap, tmp_path / "graph", expected_documents=4)
+    assert "section_path_titles" in str(exc.value)
+    assert not (tmp_path / "graph").exists()

@@ -414,9 +414,10 @@ The snapshot lives under `data/snapshots/pilot-v2` — a gitignored path
 
 ## 8. Recommended next step
 
-M1 corrections are in place and M1.5 (deterministic structural graph) is
-now complete — see `evidence/m1_5-report.md` for its full evidence and
-verdict. Per SPEC.md M2's blocking precondition, do **not** begin M2 (rule
+M1 corrections are in place. M1.5 (deterministic structural graph) was
+reopened by a later 2026-11-01 review of the graph code (not of M1, whose
+verdict stands), fixed, re-run, and is **PASS** — see
+`evidence/m1_5-report.md` §8–§9. Per SPEC.md M2's blocking precondition, do **not** begin M2 (rule
 extraction) until a controlled regeneration of the full element/section
 layer runs outside the frozen upstream tree; until then all snapshots stay
 `chunk_only` and extraction stays blocked by design.

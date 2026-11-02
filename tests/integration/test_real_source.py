@@ -108,23 +108,27 @@ def test_full_corpus_graph(tmp_path):
     assert stats["citations"]["cross_family_resolved_edges"] == 0
     assert stats["citations"]["self_citations_dropped"] == 5
     assert stats["citations"]["resolved_edges"] == 42
-    # Softer bounds where granularity legitimately depends on parse detail.
-    # NOTE (2026-11-01 correction): the M1.5 discovery-sweep narrative's rough
-    # manual estimate ("307 distinct terms") was a preliminary heuristic
-    # count; the finished conservative state-machine parser in graph/terms.py
-    # - which deliberately drops footnote contamination and only promotes a
-    # paragraph to its own entry when it matches one of the four verified
-    # formats - measurably yields 238 distinct terms from 254 parsed entries
-    # over 40 documents' definitions sections, with only 11/321 paragraphs
-    # (3.4%) genuinely unparsed (reported in deliverable_stats, not invented).
-    # The bound below is pinned to that verified, reproducible real-corpus
-    # count rather than the earlier unverified estimate.
-    assert stats["terms"]["distinct_terms"] >= 230
-    assert len(stats["terms"]["multi_doc_terms"]) >= 10
-    assert 80 <= stats["sections"]["noisy_titles_excluded"] <= 130
+    # Definitions, pinned to the frozen corpus and reconciled against the
+    # discovery sweep's separate ad hoc count (337 entries / 307 terms / 25
+    # multi-doc). Per format the build equals the sweep for lettered (152),
+    # unmarked-dash (70) and unmarked-colon (60); bulleted is 56 vs 55 (same
+    # ten documents); plus the 1 copula-form entry the sweep listed apart
+    # from its 337 -> 339 entries. Distinct terms: those 2, plus 'Level 1'..
+    # 'Level 4' (CRS-SOP-027), which the sweep's own trailing-digit rule
+    # merged into one -> 312. The 25 multi-doc terms equal the sweep's list.
+    # An earlier build's 254 / 238 / 12 was a parser bug (single-newline
+    # chunk join), fixed in the 2026-11-01 review.
+    assert stats["terms"]["entries_parsed"] == 339
+    assert stats["terms"]["distinct_terms"] == 312
+    assert len(stats["terms"]["multi_doc_terms"]) == 25
+    assert stats["sections"]["noisy_titles_excluded"] == 108
     assert stats["sections"]["unknown_family_docs"] == []
     assert manifest["derivations"]["INFERRED"] > 0
+    roles = stats["roles"]
+    assert (roles["duties_explicit"] + roles["duties_inferred"]
+            == manifest["edge_kinds"]["RESPONSIBLE_FOR"])
 
     report = verify_graph(graph, snap)
     assert report["ok"], json.dumps(report["failures"][:10], indent=1)
+    assert report["reproduced"] is True
     assert report["evidence_spans_verified"] > 1000
