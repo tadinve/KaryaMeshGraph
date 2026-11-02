@@ -150,12 +150,15 @@ class JoinedSection:
     fused the first definition of each chunk into the previous one and
     silently lost 85 of 339 real definitions."""
 
-    def __init__(self, pieces: list[tuple[str, str, list | None, bool]]):
-        # pieces: (chunk_uid, text, pages, continues_previous_piece)
+    def __init__(self, pieces: list[tuple]):
+        # pieces: (chunk_uid, text, pages, continues_previous_piece
+        #          [, index_adjacent_to_previous_piece — default False])
         parts: list[str] = []
         self._bounds: list[tuple[int, int, str, int, int | None]] = []
+        self._adjacent: list[bool] = []
         pos = 0
-        for i, (uid, t, pages, cont) in enumerate(pieces):
+        for i, (uid, t, pages, cont, *rest) in enumerate(pieces):
+            self._adjacent.append(bool(rest[0]) if rest else False)
             if i:
                 sep = CONTINUATION_SEPARATOR if cont else ELEMENT_SEPARATOR
                 parts.append(sep)
@@ -175,6 +178,18 @@ class JoinedSection:
                 if i and self.text[self._bounds[i - 1][1]:s] == "":
                     return False  # continuation join: same element
                 return self.text[s:offset].strip() == ""
+        return False
+
+    def starts_adjacent_element(self, offset: int) -> bool:
+        """Like ``starts_new_element``, but only for a piece that directly
+        follows the previous member piece in upstream index order: no
+        index gap and no skipped non-member chunk in between. Only such a
+        boundary can split one sentence across two chunks."""
+        if not self.starts_new_element(offset):
+            return False
+        for i, (s, e, *_rest) in enumerate(self._bounds):
+            if s <= offset < e or (offset == e and s == e):
+                return i > 0 and self._adjacent[i]
         return False
 
     def spans(self, start: int, end: int) -> list[dict]:
@@ -201,8 +216,9 @@ def joined_section(chunks: list[dict], member) -> JoinedSection | None:
             continue
         # A cut element continues only into the ADJACENT chunk; a member
         # filter that skipped chunks in between breaks the continuation.
-        cont = (prev is not None and rec["index"] == prev["index"] + 1
-                and continues_into_next(prev))
-        pieces.append((rec["chunk_uid"], rec["text"], rec.get("pages"), cont))
+        adjacent = prev is not None and rec["index"] == prev["index"] + 1
+        cont = adjacent and continues_into_next(prev)
+        pieces.append((rec["chunk_uid"], rec["text"], rec.get("pages"), cont,
+                       adjacent))
         prev = rec
     return JoinedSection(pieces) if pieces else None

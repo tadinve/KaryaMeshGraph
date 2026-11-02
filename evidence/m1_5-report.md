@@ -142,6 +142,10 @@ KMG_REAL_SOURCE_ROOT=../KaryaMeshScratch uv run pytest -q
   - Real source (`KMG_REAL_SOURCE_ROOT=../KaryaMeshScratch uv run pytest
     -q`): **162 passed**, 0 failed, 0 skipped. This includes the pinned
     real-corpus counts and the reproduction check.
+- **After the third-round fixes (owner's run, 2026-11-01):** **165 passed,
+  4 skipped** fixture-only; **169 passed** with the real source; 0 failed.
+  These include the 7 new latent-case tests (§9). The graph was not
+  rebuilt: its output is byte-identical (§9, third round).
 - Pre-fix (superseded): 69 passed / 3 skipped fixture-only; 72 passed with
   `KMG_REAL_SOURCE_ROOT`. Those runs asserted the buggy definition counts
   (≥230 terms, ≥10 multi-doc terms), so they could not catch the parser
@@ -326,6 +330,25 @@ side effect. The 12 confirmed issues (all minor) are fixed:
 | Real-corpus pins (339/309) cited the sweep as confirmation without explaining the gap | Gap reconciled per format; the investigation exposed the trailing-digit bug (`Level 1`–`4` merged, `ISO 17034` mangled), now fixed (312 terms) | `test_normalize_term`, real pins |
 | `--alias-out` could overwrite a published graph's pinned `alias-table.json`, or land inside this build's own output | Both refused before any output exists; ancestor-inspection errors fail closed; a post-publish write failure is a typed error | `test_alias_out_refuses_paths_inside_graph_trees` |
 | Orphan check used the output name as a glob pattern | Literal prefix match | `test_orphan_check_matches_names_literally` |
+
+**Third round — verification of the round-2 fixes.** Two agents re-traced
+every graph test and hunted regressions, and each issue was
+skeptic-verified. No assertion was predicted to fail. 10 issues were
+confirmed, all low severity and all latent: none changes any output on
+the frozen corpus. The rebuilt graph is byte-identical to the §6a build,
+same `graph_id`, so the evidence above stands and no rebuild is needed.
+
+| Finding | Fix | Covered by |
+|---|---|---|
+| Cross-chunk definition continuation could jump an index gap or a skipped chunk, or swallow a group header, promoting a truncated entry to EXPLICIT (3 findings) | Continuation requires the index-adjacent chunk; the group-header test runs first | `test_continuation_requires_index_adjacent_chunk`, `test_group_header_opening_a_chunk_is_not_absorbed` |
+| `--alias-out` inside the input snapshot (or any snapshot tree) was accepted, then invalidated the snapshot (2 findings) | Refused before any output exists, like graph trees | `test_alias_out_refuses_snapshot_trees` |
+| A case-variant spelling of the output path passed the own-output check on case-insensitive APFS | Casefolded containment check, plus a re-check after publish | `test_alias_out_refuses_paths_inside_graph_trees` |
+| Manifest parse still crashed on oversized ints or deep nesting (2 findings) | Reported as invalid JSON, as for the JSONL files | `test_verify_reports_malformed_manifest` |
+| The "cannot inspect ancestors → refuse" branch was dead code: `Path.is_file()` swallows permission errors on Python 3.14 (2 findings) | `os.stat`-based check; any error other than not-found refuses | `test_alias_out_unreadable_ancestor_fails_closed` |
+
+The builder stays `m1.5-structural-2`, because these fixes change no
+output on the reference corpus. Any other input is still covered by the
+byte-for-byte reproduction check.
 
 Schema `2.0.0` / builder `m1.5-structural-2` mark the change; graphs from
 the earlier builder fail `graph verify` by design and must be rebuilt.

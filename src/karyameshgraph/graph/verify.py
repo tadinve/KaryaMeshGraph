@@ -112,7 +112,7 @@ def verify_graph(graph_dir: Path, snapshot_dir: Path) -> dict:
     manifest_raw = mpath.read_bytes()
     try:
         manifest = json.loads(manifest_raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (ValueError, RecursionError):  # bad UTF-8, bad JSON, huge ints, deep nesting
         failures.append(f"{_MANIFEST} is not valid JSON")
         return report
     if not isinstance(manifest, dict):

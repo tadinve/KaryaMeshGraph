@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 from pathlib import Path
 
 from ..contracts.models import canonical_json
@@ -37,6 +38,7 @@ from .terms import build_terms
 ARTIFACT_FILES = ("nodes.jsonl", "edges.jsonl", "alias-table.json",
                   "exclusions.json")
 MANIFEST_FILE = "graph-manifest.json"
+SNAPSHOT_MANIFEST_FILE = "snapshot-manifest.json"
 GRAPH_KIND = "karyameshgraph-structural-graph"
 ALIAS_KIND = "karyameshgraph-alias-table"
 
@@ -142,40 +144,67 @@ def manifest_bytes(manifest: dict) -> bytes:
 
 
 def _within(path: Path, root: Path) -> bool:
-    return path == root or root in path.parents
+    """Casefolded containment. On a case-insensitive volume (the APFS
+    default) 'GRAPH/x' and 'graph/x' are one path, so case variants are
+    refused conservatively everywhere."""
+    p, r = str(path).casefold(), str(root).casefold()
+    return p == r or p.startswith(r.rstrip(os.sep) + os.sep)
+
+
+def _regular_file(path: Path) -> bool:
+    """``os.stat``-based: ``Path.is_file()`` returns False on a permission
+    error (Python 3.14), which would turn 'cannot inspect' into 'absent'.
+    Any OSError other than not-found propagates."""
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return stat.S_ISREG(st.st_mode)
+
+
+def _refuse_pinned_ancestors(alias_out: Path) -> None:
+    """Refuse an alias path inside any published graph or snapshot tree:
+    their files are hash-pinned by graph-manifest.json /
+    snapshot-manifest.json, and a stray file breaks their verification."""
+    target = alias_out.resolve()
+    for d in (target.parent, *target.parent.parents):
+        for name, what in ((MANIFEST_FILE, "a published graph tree"),
+                           (SNAPSHOT_MANIFEST_FILE, "a snapshot tree")):
+            try:
+                pinned = _regular_file(d / name)
+            except OSError:
+                raise SnapshotStateError(
+                    "cannot inspect alias output path's ancestors; refusing",
+                    path=str(alias_out), dir=str(d)) from None
+            if pinned:
+                raise SnapshotStateError(
+                    f"alias output path is inside {what}; its files are "
+                    f"pinned by {name}", path=str(alias_out), tree=str(d))
 
 
 def _check_alias_target(alias_out: Path, *, out_dir: Path, tmp: Path,
-                        failed: Path) -> None:
+                        failed: Path, snapshot_dir: Path) -> None:
     """Refuse to overwrite anything but a standalone previous alias table
     (the committed evidence copy is meant to be refreshed in place). A
     path inside the graph being built, its temporary tree or failure
-    report, or inside any published graph tree (whose alias-table.json is
-    hash-pinned by that graph's manifest), is refused before any output is
-    created."""
+    report, the input snapshot, or any published graph or snapshot tree is
+    refused before any output is created."""
     target = alias_out.resolve()
     for own in (out_dir, tmp, failed):
         if _within(target, own.resolve()):
             raise SnapshotStateError(
                 "alias output path collides with this build's own output",
                 path=str(alias_out), out=str(out_dir))
-    for d in (target.parent, *target.parent.parents):
-        try:
-            in_graph = (d / MANIFEST_FILE).is_file()
-        except OSError:
-            raise SnapshotStateError(
-                "cannot inspect alias output path's ancestors; refusing",
-                path=str(alias_out), dir=str(d)) from None
-        if in_graph:
-            raise SnapshotStateError(
-                "alias output path is inside a published graph tree; its "
-                "alias-table.json is pinned by that graph's manifest",
-                path=str(alias_out), graph=str(d))
+    if _within(target, snapshot_dir.resolve()):
+        raise SnapshotStateError(
+            "alias output path is inside the input snapshot",
+            path=str(alias_out), snapshot=str(snapshot_dir))
+    _refuse_pinned_ancestors(alias_out)
     if not alias_out.exists():
         return
     try:
         existing = json.loads(alias_out.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):
         existing = None
     if not (isinstance(existing, dict) and existing.get("kind") == ALIAS_KIND):
         raise SnapshotStateError(
@@ -211,7 +240,8 @@ def build_graph(snapshot_dir: Path, out_dir: Path, *,
     tmp = out_dir.parent / f"{prefix}{os.getpid()}"
     if alias_out is not None:
         alias_out = Path(alias_out)
-        _check_alias_target(alias_out, out_dir=out_dir, tmp=tmp, failed=failed)
+        _check_alias_target(alias_out, out_dir=out_dir, tmp=tmp, failed=failed,
+                            snapshot_dir=snapshot_dir)
 
     snap = load_verified_snapshot(snapshot_dir,
                                   expected_documents=expected_documents)
@@ -239,6 +269,16 @@ def build_graph(snapshot_dir: Path, out_dir: Path, *,
     failed.unlink(missing_ok=True)
 
     if alias_out is not None:
+        try:
+            # Re-check now that out_dir exists: the filesystem itself then
+            # resolves any remaining alias of the path (e.g. a hard link or
+            # Unicode-normalized spelling) into the published graph tree.
+            _refuse_pinned_ancestors(alias_out)
+        except SnapshotStateError as e:
+            raise SnapshotStateError(
+                "graph was published and verified, but the alias table "
+                "was not written: " + str(e.args[0]), out=str(out_dir),
+                path=str(alias_out)) from None
         try:
             _atomic_write(alias_out, payloads["alias-table.json"])
         except OSError as e:

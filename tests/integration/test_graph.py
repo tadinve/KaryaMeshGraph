@@ -30,6 +30,7 @@ from karyameshgraph.graph.models import graph_identity
 from karyameshgraph.graph.verify import verify_graph
 from karyameshgraph.ingest.snapshot import build_snapshot
 from karyameshgraph.ingest.source import SourceLayout
+from karyameshgraph.ingest.verify import verify_snapshot
 
 DOCS = [s["stable_id"] for s in DOC_SPECS]
 
@@ -462,6 +463,18 @@ def test_verify_reports_non_string_ids(built, tmp_path):
     assert any("malformed node record" in f for f in report["failures"])
 
 
+@pytest.mark.parametrize("payload", [
+    '{"x": ' + "1" * 5000 + "}",          # exceeds Python's int-digit limit
+    "[" * 100000 + "]" * 100000,           # nesting beyond the recursion limit
+])
+def test_verify_reports_malformed_manifest(built, tmp_path, payload):
+    bad = _copy_graph(built, tmp_path, "graph-manifest-bad")
+    (bad / "graph-manifest.json").write_text(payload, encoding="utf-8")
+    report = verify_graph(bad, built["snap"])  # must report, not raise
+    assert not report["ok"]
+    assert "graph-manifest.json is not valid JSON" in report["failures"]
+
+
 def test_verify_catches_undeclared_file(built, tmp_path):
     bad = _copy_graph(built, tmp_path, "graph-extra")
     (bad / "stray.txt").write_text("not declared")
@@ -530,7 +543,45 @@ def test_alias_out_refuses_paths_inside_graph_trees(built, tmp_path):
         build_graph(built["snap"], out, expected_documents=4,
                     alias_out=out / "alias.json")
     assert "this build's own output" in str(exc.value)
+    # A case-variant spelling is the same path on case-insensitive APFS.
+    with pytest.raises(SnapshotStateError) as exc:
+        build_graph(built["snap"], out, expected_documents=4,
+                    alias_out=tmp_path / "G-SELF" / "alias.json")
+    assert "this build's own output" in str(exc.value)
     assert not (tmp_path / "g-pinned").exists() and not out.exists()
+
+
+def test_alias_out_refuses_snapshot_trees(built, tmp_path):
+    """Snapshot files are pinned by snapshot-manifest.json: a stray alias
+    file would make the snapshot (and every graph from it) fail verify."""
+    with pytest.raises(SnapshotStateError) as exc:
+        build_graph(built["snap"], tmp_path / "g-insnap", expected_documents=4,
+                    alias_out=built["snap"] / "alias.json")
+    assert "input snapshot" in str(exc.value)
+    other = tmp_path / "other-snap"
+    shutil.copytree(built["snap"], other)
+    with pytest.raises(SnapshotStateError) as exc:
+        build_graph(built["snap"], tmp_path / "g-othersnap", expected_documents=4,
+                    alias_out=other / "chunks" / "alias.json")
+    assert "a snapshot tree" in str(exc.value)
+    assert verify_snapshot(built["snap"])["ok"]
+    assert not (built["snap"] / "alias.json").exists()
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_alias_out_unreadable_ancestor_fails_closed(built, tmp_path):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    os.chmod(locked, 0)
+    try:
+        with pytest.raises(SnapshotStateError) as exc:
+            build_graph(built["snap"], tmp_path / "g-locked", expected_documents=4,
+                        alias_out=locked / "alias.json")
+        assert "cannot inspect" in str(exc.value)
+    finally:
+        os.chmod(locked, 0o700)
+    assert not (tmp_path / "g-locked").exists()
 
 
 def test_stale_failure_report_removed_on_success(built, tmp_path):

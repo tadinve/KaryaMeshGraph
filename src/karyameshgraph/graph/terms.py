@@ -188,24 +188,26 @@ def build_terms(docs_ctx: dict[str, dict]) -> dict:
                 m = _COPULA.match(body)
                 if m:
                     matched = ("copula", m)
-            if (matched is None and open_entry is not None
-                    and js.starts_new_element(ps)
-                    and not _TERMINAL.search(_GLUED_FOOT_REFS.sub(
-                        "", js.text[open_entry["start"]:open_entry["end"]].rstrip()))):
-                # Upstream sometimes splits one sentence into two paragraph
-                # elements across a chunk boundary with no cut marker: the
-                # unterminated entry continues into the next chunk's first
-                # paragraph (which matches no entry format).
-                open_entry["end"] = pe
-                stats["paragraphs_attached"] += 1
-                stats["chunk_boundary_continuations"] += 1
-                continue
             if matched is None:
-                # Term-only group header ('MAPP' heading sub-bullets)?
+                # Term-only group header ('MAPP' heading sub-bullets)? Tested
+                # first, so a header that happens to open a chunk is never
+                # absorbed as a continuation.
                 nxt = js.text[paras[pi + 1][0]:paras[pi + 1][1]] if pi + 1 < len(paras) else ""
                 if ("\n" not in body and len(body) <= 80 and body[:1].isupper()
                         and not body.rstrip().endswith(".") and _P_BULLET.match(nxt)):
                     stats["group_headers"] += 1
+                elif (open_entry is not None
+                        and js.starts_adjacent_element(ps)
+                        and not _TERMINAL.search(_GLUED_FOOT_REFS.sub(
+                            "", js.text[open_entry["start"]:open_entry["end"]].rstrip()))):
+                    # Upstream sometimes splits one sentence into two
+                    # paragraph elements across a chunk boundary with no cut
+                    # marker: the unterminated entry continues into the
+                    # first paragraph of the index-ADJACENT chunk (never
+                    # across a gap or a skipped chunk).
+                    open_entry["end"] = pe
+                    stats["paragraphs_attached"] += 1
+                    stats["chunk_boundary_continuations"] += 1
                 else:
                     stats["paragraphs_unparsed"] += 1
                 continue

@@ -108,6 +108,37 @@ def test_unterminated_definition_continues_into_next_chunk():
     assert result["stats"]["chunk_boundary_continuations"] == 1
 
 
+@pytest.mark.parametrize("between", ["index_gap", "skipped_member"])
+def test_continuation_requires_index_adjacent_chunk(between):
+    """No sentence is split across non-adjacent chunks: an index gap or a
+    skipped non-member chunk keeps the unterminated entry AMBIGUOUS."""
+    first = _rec(1, ["DEFINITIONS"], "Batch: a quantity produced under")
+    later = "Controlled conditions in one cycle."
+    if between == "index_gap":
+        chunks = [first, _rec(7, ["DEFINITIONS"], later)]
+    else:
+        chunks = [first, _rec(2, ["DEFINITIONS", "RECORDS"], "Nested records text."),
+                  _rec(3, ["DEFINITIONS"], later)]
+    result = build_terms({SID: {"family": "B", "chunks": chunks}})
+    batch = [e for e in result["edges"] if e["src"].startswith("term/batch")][0]
+    assert batch["derivation"] == "AMBIGUOUS" and batch["truncated"]
+    assert result["stats"]["chunk_boundary_continuations"] == 0
+
+
+def test_group_header_opening_a_chunk_is_not_absorbed():
+    """The same text must not change derivation just because a chunk
+    boundary falls before a group header."""
+    ctx = {SID: {"family": "B", "chunks": [
+        _rec(1, ["DEFINITIONS"], "• Alpha: a definition cut by a footnote"),
+        _rec(2, ["DEFINITIONS"], "Review Terms (MAPP)\n\n• Beta: a second definition."),
+    ]}}
+    result = build_terms(ctx)
+    alpha = [e for e in result["edges"] if e["src"].startswith("term/alpha")][0]
+    assert alpha["derivation"] == "AMBIGUOUS" and alpha["truncated"]
+    assert result["stats"]["group_headers"] == 1
+    assert result["stats"]["chunk_boundary_continuations"] == 0
+
+
 def test_terminated_definition_does_not_absorb_next_chunk():
     ctx = {SID: {"family": "B", "chunks": [
         _rec(1, ["DEFINITIONS"], "Batch: a quantity produced in one cycle."),
